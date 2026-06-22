@@ -2,16 +2,16 @@
 #define _INCLUDE_LIGHTSOURCE_SCINTILLATION_DEPOSITIONEVENT_COMMON
 
 uniform LightParams {
-    vec3 startPosition;
-    vec3 endPosition;
+    vec3 startPosition[BATCH_SIZE];
+    vec3 endPosition[BATCH_SIZE];
 
     uint mediumIdx;
-    
-    float startTime;
-    float startVelocity;
-    float endVelocity;
 
-    float energyDeposition;
+    float startTime[BATCH_SIZE];
+    float startVelocity[BATCH_SIZE];
+    float endVelocity[BATCH_SIZE];
+
+    float energyDeposition[BATCH_SIZE];
     float photonYield;
     float timeConstant;
 } lightParams;
