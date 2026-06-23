@@ -957,6 +957,149 @@ class HistogramHitResponse(ValueHitResponse):
         return self._reducer.run(i)
 
 
+class HistogramWavelengthHitResponse(ValueHitResponse):
+    """
+    Response function creating a histogram from the values produced by the
+    given `ValueResponse` for each hit binned by their respective hit time.
+    Hits outside the range of the histogram are ignored.
+
+    Parameters
+    ----------
+    response: ValueResponse
+        Value response processing hits.
+    binCount: int, default=100
+        Number of bins in the histogram
+    wavelength0: float, default=400.0 nm
+        Left-most edge of the histogram.
+    binSize: float, default=1.m
+        Width of each bin.
+    normalization: float | None, default=None
+        Common normalization factor each bin gets multiplied with. If `None`,
+        uses the normalization constant reported by the tracer.
+    bufferCount: int, default=128
+        Number of internal buffers used to increase performance. Tuning this
+        value can further increase performance.
+    useDoublePrecision: bool, default=True
+        Whether to use double precision while summing up partial histograms.
+        Using double precision results in less numerical error, but may impact
+        performance.
+    updateResponse: bool, default=True
+        If True, when this stage is requested to update by e.g. a pipeline it
+        will also cause the response to update.
+
+    Note
+    ----
+    During the update step in a pipeline, if `updateResponse` is True the
+    response gets also updated making it unnecessary to include as a separate
+    step in most cases. This stage, however, ignores any commands produced by
+    response.run() as it is not clear where to put them chronologically.
+    """
+
+    name = "Histogram Response"
+
+    class ResponseParams(Structure):
+        _fields_ = [
+            ("_bufferAdr", buffer_reference),
+            ("_binCount", c_uint32),
+            ("_histCount", c_uint32),
+            ("wavelength0", c_float),
+            ("binSize", c_float),
+        ]
+
+    def __init__(
+        self,
+        response: ValueResponse,
+        *,
+        binCount: int = 100,
+        wavelength0: float = 400.0 * u.nm,
+        binSize: float = 1.0 * u.nm,
+        normalization: float | None = None,
+        bufferCount: int = 128,
+        useDoublePrecision: bool = True,
+        updateResponse: bool = True,
+    ) -> None:
+        super().__init__(
+            response,
+            {"ResponseParams": HistogramWavelengthHitResponse.ResponseParams},
+            {"normalization"},
+            updateResponse=updateResponse,
+        )
+        # let reducer allocate memory
+        self._reducer = BinReducer(
+            binCount=binCount,
+            bufferCount=bufferCount,
+            normalization=normalization or 1.0,
+            useDoublePrecision=useDoublePrecision,
+        )
+        # save params
+        self._normalization = normalization
+        self._useDouble = useDoublePrecision
+        self.setParams(
+            _bufferAdr=self._reducer.bufferIn.address,
+            _binCount=binCount,
+            _histCount=bufferCount,
+            wavelength0=wavelength0,
+            binSize=binSize,
+        )
+
+    @property
+    def binCount(self) -> int:
+        """Number of bins in the histogram"""
+        return self._reducer.binCount
+
+    @property
+    def normalization(self) -> float:
+        """Normalization factor applied to all bins"""
+        return self._reducer.normalization
+
+    @normalization.setter
+    def normalization(self, value: float) -> None:
+        self._normalization = value
+        self._reducer.normalization = value
+
+    @normalization.deleter
+    def normalization(self) -> None:
+        self._normalization = None
+        self._reducer.normalization = 1.0
+
+    @property
+    def sourceCode(self) -> str:
+        preamble = createPreamble(
+            BinBuffer="DoubleBuffer" if self._useDouble else "FloatBuffer",
+        )
+        code = loadShader("response/histogram/wavelength.glsl")
+        return "\n".join(
+            [
+                preamble,
+                '#line 1 "value.glsl"',
+                self.valueResponse.sourceCode,
+                '#line 1 "response/histogram/wavelength.glsl"',
+                code,
+            ]
+        )
+
+    def result(self, i: int) -> ArrayLike:
+        """The result of the i-th buffer"""
+        return self._reducer.result(i)
+
+    def prepare(self, config: TraceConfig, ray: RayModel) -> None:
+        super().prepare(config, ray)
+        if self._normalization is None:
+            self._reducer.normalization = config.normalization
+
+    def updateConfig(self, config: TraceConfig) -> None:
+        super().updateConfig(config)
+        if self._normalization is None:
+            self._reducer.normalization = config.normalization
+
+    def update(self, i: int) -> None:
+        super().update(i)
+        self._reducer.update(i)
+
+    def run(self, i: int) -> list[hp.Command]:
+        return self._reducer.run(i)
+
+
 class KernelHistogramHitResponse(ValueHitResponse):
     """
     Response function creating a histogram from the values produced by the
