@@ -11,8 +11,8 @@ uniform LightParams {
     float startVelocity[BATCH_SIZE];
     float endVelocity[BATCH_SIZE];
 
-    float energyDeposition[BATCH_SIZE];
-    float photonYield;
+    float cumulativePhotonNumber[BATCH_SIZE];
+
     float timeConstant;
 } lightParams;
 

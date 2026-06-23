@@ -12,29 +12,59 @@ ForwardRay sampleLight(
     uint idx, inout uint dim
 ) {
 
-    //select batch element
-    //energyContrib is the energy factor of the contribution, i.e. the deposited
-    //energy of the selected segment divided by its selection probability
-    #if defined(EVENT_IS) && BATCH_SIZE > 1
-    //importance sampling: P(i) proportional to the deposited energy
-    float totalEnergy = 0.0;
-    for (int i = 0; i < BATCH_SIZE; ++i)
-        totalEnergy += lightParams.energyDeposition[i];
-    float r = random(idx, dim) * totalEnergy;
-    int batchIdx = 0;
-    float cumEnergy = lightParams.energyDeposition[0];
-    while (batchIdx < BATCH_SIZE - 1 && r > cumEnergy) {
-        batchIdx++;
-        cumEnergy += lightParams.energyDeposition[batchIdx];
+    float contrib = 1.0;
+
+    ///select batch element
+
+    #ifdef LIGHT_SOURCE_EMIT_PARTICLE
+    //for light particles, the event is chosen based on the thread idx to ensure
+    //that each event gets the correct number of photons
+
+    if (idx >= int(lightParams.cumulativePhotonNumber[BATCH_SIZE-1])){
+        contrib = 0.0;
     }
-    float energyContrib = totalEnergy;
+
+    //binary search
+    int lo = 0;
+    int hi = BATCH_SIZE - 1;
+
+    while (lo < hi)
+    {
+        int mid = (lo + hi) >> 1;
+
+        if (idx < int(lightParams.cumulativePhotonNumber[mid]))
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+
+    int batchIdx = lo;
+
     #elif BATCH_SIZE > 1
-    //uniform sampling: P(i) = 1 / BATCH_SIZE
-    int batchIdx = int(random(idx, dim) * float(BATCH_SIZE));
-    float energyContrib = lightParams.energyDeposition[batchIdx] * float(BATCH_SIZE);
+
+    //importance sample a batch element
+    int x = int(floor(random(idx, dim) * float(lightParams.cumulativePhotonNumber[BATCH_SIZE-1])));
+
+    //binary search
+    int lo = 0;
+    int hi = BATCH_SIZE - 1;
+
+    while (lo < hi)
+    {
+        int mid = (lo + hi) >> 1;
+
+        if (x < int(lightParams.cumulativePhotonNumber[mid]))
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+
+    int batchIdx = lo;
+
     #else
+
     int batchIdx = 0;
-    float energyContrib = lightParams.energyDeposition[batchIdx];
+
     #endif
 
     //sample position and time along the track segment
@@ -52,16 +82,16 @@ ForwardRay sampleLight(
     float total_time = time - log(1.0 - v) * lightParams.timeConstant;
 
     //calculate contribution
-    float contrib = dw_dA(position, observer) * INV_4PI;
+    contrib = dw_dA(position, observer) * INV_4PI;
 
     #ifdef SCINTILLATION_USE_ENERGY
     // To get from photon count to energy in eV, multiply by
     //    h * c             h * c
     // ------------  with  -------- = 1.239841984e-6
     //  e * lambda            e
-    contrib *= lightParams.photonYield * energyContrib * 1.239841983e-6 / wavelength;
+    contrib *= lightParams.cumulativePhotonNumber[BATCH_SIZE-1] * 1.239841983e-6 / wavelength;
     #else
-    contrib *= lightParams.photonYield * energyContrib;
+    contrib *= lightParams.cumulativePhotonNumber[BATCH_SIZE-1];
     #endif
 
     //assemble ray

@@ -118,6 +118,7 @@ class OpticalProperties(str, Enum):
     SCINTILLATION_YIELD_PROTON = "scintillation_yield_proton"
     SCINTILLATION_YIELD_ALPHA = "scintillation_yield_alpha"
     SCINTILLATION_YIELD_ION = "scintillation_yield_ion"
+    SCINTILLATION_RESOLUTIONSCALE = "scintillation_resolutionscale"
     # polarization
     PHASE_M12 = "phase_m12"
     PHASE_M22 = "phase_m22"
@@ -250,6 +251,8 @@ def checkMedium(
             assert (y >= 0.0), "Scintillation yield for alpha particles must be non-negative!"
         if (y := getFloatData("scintillation_yield_ion")) is not None:
             assert (y >= 0.0), "Scintillation yield for ions must be non-negative!"
+        if (r := getFloatData("scintillation_resolutionscale")) is not None:
+            assert (r >= 0.0), "Scintillation resolutionscale must be non-negative!"
         if( m12 := getTableData("phase_m12")) is not None:
             assert np.all((m12 >= -1.0) & (m12 <= 1.0)), "Mueller matrix must be normalized!"
         if (m22 := getTableData("phase_m22")) is not None:

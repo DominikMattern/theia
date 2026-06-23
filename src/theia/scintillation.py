@@ -43,11 +43,11 @@ class EnergyDepositionEvent:
 def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
                           matStore: MaterialStore,
                           *,
-                          batchSize: int = 1,
+                          eventsPerBatch: int = 1,
                           padIncomplete: bool = True,
-                          doImportanceSampling: bool = False,
-                          Repetitions: int = 1,
-                          batchesPerPhoton: float = 0.01) -> list[dict]:
+                          emitParticles: bool = False,
+                          RNGSeed: int | None = None,
+                          ) -> tuple[list[dict], int | None]:
     """
     Utility function to prepare the simulation of scintillation light. Takes
     a list of events and returns a list of tasks which properly configures
@@ -63,7 +63,7 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
         List of events to generate the tasks for.
     matStore: MaterialStore
         Material Store that is used for the simulation.
-    batchSize: int, default=1
+    eventsPerBatch: int, default=1
         Number of track segments per task. Events are grouped into batches by
         (medium, scintillation component, particle code) — all three must match
         within a batch. The `ScintillationDepositionEventSource` must be
@@ -72,21 +72,26 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
         If `True`, the last batch of each group is padded with zero-energy
         segments when it has fewer than batchSize events. If `False`,
         incomplete last batches are discarded.
-    doImportanceSampling: bool, default=False
-        If `False`, each batch will get the same number of repetitions as
-        specified by Repetitions. If `True`, the number of repetitions is
-        proportional to the total photon yield in the batch (as specified by
-        batchesPerPhoton), with at least one repetition per batch.
-    Repetitions: int, default=1
-        Number of repetitions per task. Ignored if `doImportanceSampling`
-        is `True`.
-    batchesPerPhoton: float, default=0.01
-        Number of simulation repetitions per physical photon. Ignored if
-        `doImportanceSampling` is `False`.
+    emitParticles: bool, default=False
+        Whether to emit particles instead of rays. If `True` this will draw a
+        random number of photons per event based on the expected value and the
+        madium's resolution scale.
+    RNGSeed: int | None, default=None
+        The seed for the photon number RNG.
+    
+    Returns
+    -------
+    tasks: list[dict]
+        List of tasks to give to the scheduler.
+    maxBatchSize: int | None
+        If emitParticles is `True`, this gives the size of the largest batch.
+
     """
     tasks = []
     accumulators = {}   # group_key -> list of pending per-event dicts
     group_info = {}     # group_key -> (mediumIdx, effectiveYield, timeConstant, spectrumAddr)
+    seed_sequence = np.random.SeedSequence(RNGSeed)
+    maxBatchSize = 0
 
     _ZERO = {
         'startPosition': (0.0, 0.0, 0.0),
@@ -98,35 +103,44 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
     }
 
     def _flush(group_key, batch, pad_to_full=False):
+        nonlocal maxBatchSize
         medIdx, eff_yield, tc, spec = group_info[group_key]
         if pad_to_full:
-            batch = batch + [_ZERO] * (batchSize - len(batch))
-        if doImportanceSampling:
-            total_E = sum(e['energyDeposition'] for e in batch)
-            reps = int(np.max([1, np.round(eff_yield * total_E * batchesPerPhoton)]))
-        else:
-            reps = Repetitions
-        tasks.append({
+            batch = batch + [_ZERO] * (eventsPerBatch - len(batch))
+        task = {
             "lightSource__mediumIdx":        medIdx,
             "lightSource__startPosition":    [e['startPosition']    for e in batch],
             "lightSource__endPosition":      [e['endPosition']      for e in batch],
             "lightSource__startTime":        [e['startTime']        for e in batch],
             "lightSource__startVelocity":    [e['startVelocity']    for e in batch],
             "lightSource__endVelocity":      [e['endVelocity']      for e in batch],
-            "lightSource__energyDeposition": [e['energyDeposition'] for e in batch],
-            "lightSource__photonYield":      eff_yield / reps,
             "lightSource__timeConstant":     tc,
             "photons__spectrumTableAddress": spec,
-        })
-        if reps > 1:
-            tasks.extend([{}] * (reps - 1))
+        }
+        if emitParticles:
+            rng = np.random.default_rng(seed_sequence.spawn(1)[0])
+            rdm = rng.normal(0, 1, eventsPerBatch)
+            expected_number = np.clip(np.asarray([e['energyDeposition'] for e in batch]) * eff_yield,0,None)
+            resolutionscale = 1.0
+            if "scintillation_resolutionscale" in event.medium.properties:
+                resolutionscale = event.medium.properties["scintillation_resolutionscale"].value[1]
+            number = np.round(expected_number + np.sqrt(expected_number) * resolutionscale * rdm)
+            batchSize = int(np.sum(number))
+            maxBatchSize = batchSize if batchSize > maxBatchSize else maxBatchSize
+            task["lightSource__numPhotons"] = list(number)
+            task["_batchSize"] = batchSize
+        else:
+            task["lightSource__energyDeposition"] = [e['energyDeposition'] for e in batch]
+            task["lightSource__photonYield"] = eff_yield
+        
+        tasks.append(task)
 
     def _add(group_key, edict, medIdx, eff_yield, tc, spec):
         if group_key not in accumulators:
             accumulators[group_key] = []
             group_info[group_key] = (medIdx, eff_yield, tc, spec)
         accumulators[group_key].append(edict)
-        if len(accumulators[group_key]) == batchSize:
+        if len(accumulators[group_key]) == eventsPerBatch:
             _flush(group_key, accumulators.pop(group_key))
 
     for event in events:
@@ -173,7 +187,9 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
             _flush(group_key, batch, pad_to_full=True)
         # else: discard incomplete last batch
 
-    return tasks
+    maxBatchSize = None if maxBatchSize == 0 else maxBatchSize
+
+    return tasks, maxBatchSize
 
 
 def _make_float_array(n):
@@ -237,9 +253,9 @@ class ScintillationDepositionEventSource(LightSource):
     ----------
     wavelengthSource: WavelengthSource
         Source to sample wavelengths from. Required for forward mode.
-    mediumIdx: int
+    mediumIdx: int, default=0
         Index of the medium the light source is located in.
-    batchSize: int, default=1
+    eventsPerBatch: int, default=1
         Number of track segments stored per batch. Each simulation step
         picks one segment at random. Cannot be changed after initialization.
     startPosition: (float,float,float) | Iterable[(float,float,float)], default=(0,0,0)
@@ -253,29 +269,29 @@ class ScintillationDepositionEventSource(LightSource):
     endVelocity: float | Iterable[float], default=0.0
         Particle velocity/velocities at the end of the track segment(s).
     energyDeposition: float | Iterable[float], default=1.0 keV
-        Energy deposited per segment.
+        Energy deposited per segment. Will be ignored if `emitParticles` is `True`.
     photonYield: float, default=10000/MeV
-        Number of generated photons per deposited energy.
+        Number of generated photons per deposited energy. Will be ignored if 
+        `emitParticles` is `True`.
     timeConstant: float, default=0.0
         Time constant of the exponential decay.
     usePhotonCount: bool, default=True
         If `True` sampled radiance has units of number photons, otherwise eV.
     emitParticles: bool, default=False
-        Whether to emit particles instead of rays.
-    doEventIS: bool, default=False
-        Whether to importance sample the track segment within a batch. If
-        `False`, segments are drawn with equal probability. If `True`, a
-        segment is drawn with probability proportional to its deposited
-        energy. This can slow down the simulation at large batch sizes.
-        Has no effect for batchSize=1.
+        Whether to emit particles instead of rays. If `True` the number of photons
+        specified in `numPhotons` will be sampled for each track segment.
+    numPhotons: int | Iterable[int], default=1
+        Number of photons to sample per event. The sum of these in a batch must
+        be equal to the batch size of the tracer. Will be ignored if `emitParticles`
+        is `False`.
     """
 
     def __init__(
         self,
         wavelengthSource: WavelengthSource | None = None,
         *,
-        mediumIdx: int,
-        batchSize: int = 1,
+        mediumIdx: int = 0,
+        eventsPerBatch: int = 1,
         startPosition: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, 0.0, 0.0),
         endPosition: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, 0.0, 0.0),
         startTime: float | Iterable[float] = 0.0,
@@ -286,39 +302,38 @@ class ScintillationDepositionEventSource(LightSource):
         timeConstant: float = 0.0,
         usePhotonCount: bool = True,
         emitParticles: bool = False,
-        doEventIS: bool = False,
+        numPhotons: int | Iterable[int] = 1,
     ) -> None:
-        _FA = _make_float_array(batchSize)
-        _V3A = _make_vec3_array(batchSize)
+        _FA = _make_float_array(eventsPerBatch)
+        _V3A = _make_vec3_array(eventsPerBatch)
 
         class LightParams(Structure):
             _fields_ = [
-                ("startPosition",    _V3A),
-                ("endPosition",      _V3A),
-                ("mediumIdx",        c_uint32),
-                ("startTime",        _FA),
-                ("startVelocity",    _FA),
-                ("endVelocity",      _FA),
-                ("energyDeposition", _FA),
-                ("photonYield",      c_float),
-                ("timeConstant",     c_float),
+                ("startPosition",          _V3A),
+                ("endPosition",            _V3A),
+                ("mediumIdx",              c_uint32),
+                ("startTime",              _FA),
+                ("startVelocity",          _FA),
+                ("endVelocity",            _FA),
+                ("cumulativePhotonNumber", _FA),
+                ("timeConstant",           c_float),
             ]
 
         lam = wavelengthSource
-        _extra = 1 if batchSize > 1 else 0
+        addRNG = 1 if eventsPerBatch > 1 and not emitParticles else 0
         super().__init__(
-            nRNGForward=0 if lam is None else lam.nRNGSamples + 4 + _extra,
-            nRNGBackward=2 + _extra,
+            nRNGForward=0 if lam is None else lam.nRNGSamples + 4 + addRNG,
+            nRNGBackward=2 + addRNG,
             wavelengthSource=wavelengthSource,
             params={"LightParams": LightParams},
+            extra={"energyDeposition", "photonYield", "numPhotons"}
         )
         # check params
         if emitParticles and not usePhotonCount:
             raise ValueError("Must use photon count when emitting particles")
 
         # save params
-        self._batchSize = batchSize
-        self._doEventIS = doEventIS
+        self._batchSize = eventsPerBatch
         self._usePhotonCount = usePhotonCount
         self._emitParticles = emitParticles
 
@@ -329,10 +344,10 @@ class ScintillationDepositionEventSource(LightSource):
             of positions must already have length batchSize.
             """
             if isinstance(v[0], (int, float)):
-                return [tuple(v)] * batchSize
+                return [tuple(v)] * eventsPerBatch
             v = list(v)
-            if len(v) != batchSize:
-                raise ValueError(f"'{name}' must have length {batchSize}, got {len(v)}")
+            if len(v) != eventsPerBatch:
+                raise ValueError(f"'{name}' must have length {eventsPerBatch}, got {len(v)}")
             return v
 
         def _norm_float(v, name):
@@ -342,10 +357,10 @@ class ScintillationDepositionEventSource(LightSource):
             values must already have length batchSize.
             """
             if isinstance(v, (int, float)):
-                return [v] * batchSize
+                return [v] * eventsPerBatch
             v = list(v)
-            if len(v) != batchSize:
-                raise ValueError(f"'{name}' must have length {batchSize}, got {len(v)}")
+            if len(v) != eventsPerBatch:
+                raise ValueError(f"'{name}' must have length {eventsPerBatch}, got {len(v)}")
             return v
 
         startPosition    = _norm_vec3(startPosition,    "startPosition")
@@ -354,6 +369,7 @@ class ScintillationDepositionEventSource(LightSource):
         startVelocity    = _norm_float(startVelocity,   "startVelocity")
         endVelocity      = _norm_float(endVelocity,     "endVelocity")
         energyDeposition = _norm_float(energyDeposition,"energyDeposition")
+        numPhotons       = _norm_float(numPhotons,      "numPhotons")
 
         self.setParams(
             startPosition=startPosition,
@@ -365,6 +381,7 @@ class ScintillationDepositionEventSource(LightSource):
             energyDeposition=energyDeposition,
             photonYield=photonYield,
             timeConstant=timeConstant,
+            numPhotons=numPhotons,
         )
 
     @property
@@ -383,17 +400,11 @@ class ScintillationDepositionEventSource(LightSource):
         return self._usePhotonCount
 
     @property
-    def doEventIS(self) -> bool:
-        """Whether events within a batch are importance sampled by deposited energy"""
-        return self._doEventIS
-
-    @property
     def forwardSourceCode(self) -> str | None:
         if self.wavelengthSource is None:
             return None
         preamble = createPreamble(
             BATCH_SIZE=self.batchSize,
-            EVENT_IS=self.doEventIS,
             LIGHT_SOURCE_EMIT_PARTICLE=self.emitsParticles,
             SCINTILLATION_USE_ENERGY=not self.usePhotonCount,
         )
@@ -406,9 +417,22 @@ class ScintillationDepositionEventSource(LightSource):
             return None
         preamble = createPreamble(
             BATCH_SIZE=self._batchSize,
-            EVENT_IS=self.doEventIS,
             LIGHT_SOURCE_EMIT_PARTICLE=self.emitsParticles,
             SCINTILLATION_USE_ENERGY=not self.usePhotonCount,
         )
         code = loadShader("lightsource/scintillation/deposition_event/backward.glsl")
         return preamble + code
+    
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        if self.emitsParticles:
+            numPhotons = self.getParam("numPhotons")
+            # compute culmulative number of photons for sampling
+            c = np.cumsum(numPhotons)
+            self.setParam("cumulativePhotonNumber", c)
+        else:
+            photonYield = self.getParam("photonYield")
+            energyDeposition = self.getParam("energyDeposition")
+            # compute culmulative expected number of photons for sampling
+            c = np.cumsum(np.asarray(energyDeposition) * photonYield)
+            self.setParam("cumulativePhotonNumber", c)
