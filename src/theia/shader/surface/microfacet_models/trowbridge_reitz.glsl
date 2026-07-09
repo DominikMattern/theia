@@ -1,18 +1,18 @@
-#define SURFACE_MODEL_TROWBRIDGE_REITZ
+#ifndef _INCLUDE_SURFACE_MICROFACET_TROWBRIDGE_REITZ
+#define _INCLUDE_SURFACE_MICROFACET_TROWBRIDGE_REITZ
 
 #include "math.glsl"
 
+//sampling of micro-facets from the Trowbridge-Reitz (GGX) distribution
+vec3 sample_microfacet_normal(vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
 
-//sampling of micro-facets according to the Trowbridge_Reitz distribution
-vec3 sample_microfacet_normal(const RAY ray, const SurfaceHit hit, uint idx, inout uint dim){
-
-    float alpha = loadMaterialSlot_vec2(ROUGHNESS_PARAMETER, hit.materialIdx).y;
+    float alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
 
     //sample angles (theta, phi)
     vec2 rdm = random2D(idx, dim);
     float tan2_theta = alpha * alpha * rdm.x / (1 - rdm.x);
     float phi = TWO_PI * rdm.y;
-    
+
     float cos_theta = sqrt(1.0 / (1.0 + tan2_theta));
     float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
 
@@ -23,6 +23,8 @@ vec3 sample_microfacet_normal(const RAY ray, const SurfaceHit hit, uint idx, ino
 }
 
 //check that ray hits micro-facet from the front
-bool check_microfacet(vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, const RAY ray, uint idx, inout uint dim){
-    return (dot(ray.direction, microfacetNormal) < 0.0);
+bool check_microfacet(vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
+    return (dot(rayDir, microfacetNormal) < 0.0);
 }
+
+#endif

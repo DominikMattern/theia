@@ -1,23 +1,24 @@
-#define SURFACE_MODEL_TROWBRIDGE_REITZ_SHADOWED
+#ifndef _INCLUDE_SURFACE_MICROFACET_TROWBRIDGE_REITZ_SHADOWED
+#define _INCLUDE_SURFACE_MICROFACET_TROWBRIDGE_REITZ_SHADOWED
 
 #include "math.glsl"
 #include "util/sample.glsl"
 
 /*
-Sampling of visible micro-facets according to the Trowbeidge-Reitz model. The sampling algorithm
+Sampling of visible micro-facets according to the Trowbridge-Reitz model. The sampling algorithm
 is described in [1].
 
 [1] Matt Pharr, Wenzel Jakob, and Greg Humphreys "Physically Based Rendering: From Theory To Implementation"
     (2023) https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory
 */
-vec3 sample_microfacet_normal(const RAY ray, const SurfaceHit hit, uint idx, inout uint dim){
+vec3 sample_microfacet_normal(vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
 
     //Transformation matrix for local coordinate system. The surface normal is the new z-axis, and the
     //tangential component of the incoming ray is along the new y-axis.
-    mat3 trafo = createLocalCOSY(hit.rayNrm, perpendicularTo(hit.rayNrm, ray.direction));
+    mat3 trafo = createLocalCOSY(hit.rayNrm, perpendicularTo(hit.rayNrm, rayDir));
 
-    float cos_n = abs(dot(hit.rayNrm, ray.direction));
-    float alpha = loadMaterialSlot_vec2(ROUGHNESS_PARAMETER, hit.materialIdx).y;
+    float cos_n = abs(dot(hit.rayNrm, rayDir));
+    float alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
 
     //transform surface normal to hemispherical configuration, using (0, -sin_n, -cos_n) as incoming direction
     vec3 wh = normalize(vec3(0.0, alpha * sqrt(max(1.0 - cos_n*cos_n, 0.0)), cos_n));
@@ -57,9 +58,11 @@ float masking_function(float cos_n, float alpha){
 
 
 //rejection sample the masking
-bool check_microfacet(vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, const RAY ray, uint idx, inout uint dim){
+bool check_microfacet(vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
     float u = random(idx, dim);
-    float alpha = loadMaterialSlot_vec2(ROUGHNESS_PARAMETER, hit.materialIdx).y;
+    float alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
     float mask = masking_function(abs(dot(dirOut, hit.rayNrm)), alpha);
     return (mask > u);
 }
+
+#endif

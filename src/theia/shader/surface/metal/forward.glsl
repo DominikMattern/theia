@@ -1,5 +1,5 @@
-#ifndef _INCLUDE_SURFACE_MODEL_DIELECTRIC_ROUGH_UNIFIED_FORWARD
-#define _INCLUDE_SURFACE_MODEL_DIELECTRIC_ROUGH_UNIFIED_FORWARD
+#ifndef _INCLUDE_SURFACE_MODEL_METAL_FORWARD
+#define _INCLUDE_SURFACE_MODEL_METAL_FORWARD
 
 #include "surface/propagate/forward.glsl"
 
@@ -7,7 +7,7 @@
 #define NO_TRANSMIT_BIT MATERIAL_NO_TRANSMIT_FWD_BIT
 
 #define RAY ForwardRay
-#include "surface/dielectric_rough_unified/template.glsl"
+#include "surface/metal/template.glsl"
 #undef RAY
 
 #undef NO_REFLECT_BIT

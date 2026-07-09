@@ -1,10 +1,7 @@
-//only specular scattering
-#define SURFACE_MODEL_SPECULAR
+#include "surface/fresnel.glsl"
 
 struct SurfaceProperties {
     float reflectance;
-    float n_i;
-    float n_o;
     bool doReflect;
 };
 
@@ -16,10 +13,27 @@ SurfaceProperties prepareSurface(
     const SurfaceHit hit,
     uint idx, inout uint dim
 ) {
-    //fetch refractive indices and reflectance
-    float n_i = lookUpMediaTable1D(REFRACTIVE_INDEX, ray.mediumIdx, ray.wavelength, 1.0);
-    float n_o = lookUpMediaTable1D(REFRACTIVE_INDEX, hit.otherMediumIdx, ray.wavelength, 1.0);
-    float r = lookUpMaterialTable1D(REFLECTIVITY, hit.materialIdx, ray.wavelength, 1.0);
+    //fetch reflectance: use the optional reflectivity material property if given,
+    //otherwise compute the conductor Fresnel reflectance from the metal's complex
+    //refractive index (real part = medium refractive_index, imaginary part =
+    //medium extinction_coefficient of the other side).
+    bool hasReflectivity = false;
+    float r = 1.0;
+    #ifdef MATERIAL_SLOT_REFLECTIVITY
+        //-1.0 sentinel: lookUp returns it if this material has no reflectivity table
+        float refl = lookUpMaterialTable1D(REFLECTIVITY, hit.materialIdx, ray.wavelength, -1.0);
+        if (refl >= 0.0) { r = refl; hasReflectivity = true; }
+    #endif
+    if (!hasReflectivity) {
+        float n_i = lookUpMediaTable1D(REFRACTIVE_INDEX, ray.mediumIdx, ray.wavelength, 1.0);
+        float n_o = lookUpMediaTable1D(REFRACTIVE_INDEX, hit.otherMediumIdx, ray.wavelength, 1.0);
+        float k = 0.0;
+        #ifdef MEDIA_SLOT_EXTINCTION_COEFFICIENT
+            k = lookUpMediaTable1D(EXTINCTION_COEFFICIENT, hit.otherMediumIdx, ray.wavelength, 0.0);
+        #endif
+        float cos_i = abs(dot(ray.direction, hit.rayNrm));
+        r = fresnelConductor(cos_i, n_i, n_o, k);
+    }
 
     //especially for particles it is important to make the same decision in
     //processSurfaceTargetHit() and sampleSurfaceInteraction() to ensure we
@@ -28,7 +42,7 @@ SurfaceProperties prepareSurface(
     bool doReflect = random(idx, dim) < r;
 
     //return properties
-    return SurfaceProperties(r, n_i, n_o, doReflect);
+    return SurfaceProperties(r, doReflect);
 }
 
 bool processSurfaceTargetHit(
@@ -39,13 +53,6 @@ bool processSurfaceTargetHit(
     out HitItem item,
     uint idx, inout uint dim
 ) {
-    //if requested, transmit ray before detecting
-    //(this does not change ray contribution)
-    bool transmitHit = (hit.flags & MATERIAL_TRANSMIT_HIT_BIT) != 0;
-    if (transmitHit) {
-        transmitRay(ray, hit);
-    }
-
     #ifdef RAY_PARTICLE
 
     //we can only detect whole particles -> ignore if we sampled reflection earlier
@@ -83,11 +90,7 @@ ResultCode sampleSurfaceInteraction(
     uint idx, inout uint dim
 ) {
     //fetch material flags
-    bool isDetector = (hit.flags & MATERIAL_DETECTOR_BIT) != 0;
     bool canReflect = (hit.flags & NO_REFLECT_BIT) == 0;
-    bool canTransmit = (hit.flags & NO_TRANSMIT_BIT) == 0;
-    //detector implies no transmit
-    canTransmit = !isDetector && canTransmit;
 
     //handle surface reflection/transmission
     #ifdef RAY_PARTICLE
@@ -96,13 +99,6 @@ ResultCode sampleSurfaceInteraction(
     ResultCode result;
     if (props.doReflect && canReflect) {
         result = reflectRay(ray, hit);
-    }
-    else if (!props.doReflect && canTransmit) {
-        result = transmitRay(ray, hit, props.n_i, props.n_o);
-        //due to finite numerical precision, we might run into total internal
-        //reflection earlier than expected -> mark as absorbed
-        if (result == ERROR_CODE_TOTAL_INTERNAL_REFLECTION)
-            result = RESULT_CODE_RAY_ABSORBED;
     }
     else {
         //sampled decision is forbidden -> abort tracing
@@ -115,27 +111,11 @@ ResultCode sampleSurfaceInteraction(
     #else
 
     ResultCode result;
-    if (canReflect && canTransmit) {
-        if (props.doReflect) {
-            result = reflectRay(ray, hit);
-        }
-        else {
-            result = transmitRay(ray, hit, props.n_i, props.n_o);
-        }
-    }
-    else if(canReflect && props.reflectance > 0.0) {
+
+    if(canReflect && props.reflectance > 0.0) {
         //only reflection allowed -> deterministically reflect
         ray.lin_contrib *= props.reflectance;
         result = reflectRay(ray, hit);
-    }
-    else if(canTransmit && props.reflectance < 1.0) {
-        //only transmission allowed -> deterministically transmit
-        ray.lin_contrib *= (1.0 - props.reflectance);
-        result = transmitRay(ray, hit, props.n_i, props.n_o);
-        //due to finite numerical precision, we might run into total internal
-        //reflection earlier than expected -> mark as absorbed
-        if (result == ERROR_CODE_TOTAL_INTERNAL_REFLECTION)
-            result = RESULT_CODE_RAY_ABSORBED;
     }
     else {
         return RESULT_CODE_RAY_ABSORBED;

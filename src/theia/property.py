@@ -375,7 +375,12 @@ def createSlotMacros(table: PropertyTable, prefix: str) -> dict[str, int]:
 
 
 def RoughUnifiedSurfacePPFProperty(sigma: float, numSamples: int = 1024):
-    """Util function to create the ppf property for the UNIFIED rough surface model."""
+    """
+    Util function to create the ppf property for the "gaussian" rough surface
+    model (`surface.DielectricRoughSurface(model="gaussian")`), which samples
+    micro-facets from a Gaussian slope distribution. This mirrors the
+    micro-facet sampling of the Geant4 UNIFIED model.
+    """
     class Dist:
         """Bundle fn into a class for use with scipy"""
 
