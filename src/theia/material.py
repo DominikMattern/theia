@@ -104,21 +104,65 @@ class OpticalProperties(str, Enum):
     LOG_PHASE_FUNC = "log_phase_function"
     PHASE_SAMPLING = "phase_sampling"
     REFRACTIVE_INDEX = "refractive_index"
+    EXTINCTION_COEFFICIENT = "extinction_coefficient"
     SCATTERING_COEF = "scattering_coef"
     # scintillation
     SCINTILLATION_SPECTRUM_1_SAMPLER = "scintillation_spectrum_1_sampler"
     SCINTILLATION_SPECTRUM_2_SAMPLER = "scintillation_spectrum_2_sampler"
+    SCINTILLATION_SPECTRUM_3_SAMPLER = "scintillation_spectrum_3_sampler"
     SCINTILLATION_TIME_CONSTANT_1 = "scintillation_time_constant_1"
     SCINTILLATION_TIME_CONSTANT_2 = "scintillation_time_constant_2"
-    SCINTILLATION_BRANCHING_RATIO_ELECTRON = "scintillation_branching_ratio_electron"
-    SCINTILLATION_BRANCHING_RATIO_PROTON = "scintillation_branching_ratio_proton"
-    SCINTILLATION_BRANCHING_RATIO_ALPHA = "scintillation_branching_ratio_alpha"
-    SCINTILLATION_BRANCHING_RATIO_ION = "scintillation_branching_ratio_ion"
+    SCINTILLATION_TIME_CONSTANT_3 = "scintillation_time_constant_3"
+    SCINTILLATION_TIME_CONSTANT_1_ELECTRON = "scintillation_time_constant_1_electron"
+    SCINTILLATION_TIME_CONSTANT_2_ELECTRON = "scintillation_time_constant_2_electron"
+    SCINTILLATION_TIME_CONSTANT_3_ELECTRON = "scintillation_time_constant_3_electron"
+    SCINTILLATION_TIME_CONSTANT_1_PROTON = "scintillation_time_constant_1_proton"
+    SCINTILLATION_TIME_CONSTANT_2_PROTON = "scintillation_time_constant_2_proton"
+    SCINTILLATION_TIME_CONSTANT_3_PROTON = "scintillation_time_constant_3_proton"
+    SCINTILLATION_TIME_CONSTANT_1_ALPHA = "scintillation_time_constant_1_alpha"
+    SCINTILLATION_TIME_CONSTANT_2_ALPHA = "scintillation_time_constant_2_alpha"
+    SCINTILLATION_TIME_CONSTANT_3_ALPHA = "scintillation_time_constant_3_alpha"
+    SCINTILLATION_TIME_CONSTANT_1_ION = "scintillation_time_constant_1_ion"
+    SCINTILLATION_TIME_CONSTANT_2_ION = "scintillation_time_constant_2_ion"
+    SCINTILLATION_TIME_CONSTANT_3_ION = "scintillation_time_constant_3_ion"
+    SCINTILLATION_TIME_CONSTANT_1_DEUTERON = "scintillation_time_constant_1_deuteron"
+    SCINTILLATION_TIME_CONSTANT_2_DEUTERON = "scintillation_time_constant_2_deuteron"
+    SCINTILLATION_TIME_CONSTANT_3_DEUTERON = "scintillation_time_constant_3_deuteron"
+    SCINTILLATION_TIME_CONSTANT_1_TRITON = "scintillation_time_constant_1_triton"
+    SCINTILLATION_TIME_CONSTANT_2_TRITON = "scintillation_time_constant_2_triton"
+    SCINTILLATION_TIME_CONSTANT_3_TRITON = "scintillation_time_constant_3_triton"
+    SCINTILLATION_BRANCHING_RATIO_1 = "scintillation_branching_ratio_1"
+    SCINTILLATION_BRANCHING_RATIO_2 = "scintillation_branching_ratio_2"
+    SCINTILLATION_BRANCHING_RATIO_3 = "scintillation_branching_ratio_3"
+    SCINTILLATION_BRANCHING_RATIO_1_ELECTRON = "scintillation_branching_ratio_1_electron"
+    SCINTILLATION_BRANCHING_RATIO_2_ELECTRON = "scintillation_branching_ratio_2_electron"
+    SCINTILLATION_BRANCHING_RATIO_3_ELECTRON = "scintillation_branching_ratio_3_electron"
+    SCINTILLATION_BRANCHING_RATIO_1_PROTON = "scintillation_branching_ratio_1_proton"
+    SCINTILLATION_BRANCHING_RATIO_2_PROTON = "scintillation_branching_ratio_2_proton"
+    SCINTILLATION_BRANCHING_RATIO_3_PROTON = "scintillation_branching_ratio_3_proton"
+    SCINTILLATION_BRANCHING_RATIO_1_ALPHA = "scintillation_branching_ratio_1_alpha"
+    SCINTILLATION_BRANCHING_RATIO_2_ALPHA = "scintillation_branching_ratio_2_alpha"
+    SCINTILLATION_BRANCHING_RATIO_3_ALPHA = "scintillation_branching_ratio_3_alpha"
+    SCINTILLATION_BRANCHING_RATIO_1_ION = "scintillation_branching_ratio_1_ion"
+    SCINTILLATION_BRANCHING_RATIO_2_ION = "scintillation_branching_ratio_2_ion"
+    SCINTILLATION_BRANCHING_RATIO_3_ION = "scintillation_branching_ratio_3_ion"
+    SCINTILLATION_BRANCHING_RATIO_1_DEUTERON = "scintillation_branching_ratio_1_deuteron"
+    SCINTILLATION_BRANCHING_RATIO_2_DEUTERON = "scintillation_branching_ratio_2_deuteron"
+    SCINTILLATION_BRANCHING_RATIO_3_DEUTERON = "scintillation_branching_ratio_3_deuteron"
+    SCINTILLATION_BRANCHING_RATIO_1_TRITON = "scintillation_branching_ratio_1_triton"
+    SCINTILLATION_BRANCHING_RATIO_2_TRITON = "scintillation_branching_ratio_2_triton"
+    SCINTILLATION_BRANCHING_RATIO_3_TRITON = "scintillation_branching_ratio_3_triton"
+    SCINTILLATION_YIELD = "scintillation_yield"
     SCINTILLATION_YIELD_ELECTRON = "scintillation_yield_electron"
     SCINTILLATION_YIELD_PROTON = "scintillation_yield_proton"
     SCINTILLATION_YIELD_ALPHA = "scintillation_yield_alpha"
+    SCINTILLATION_YIELD_DEUTERON = "scintillation_yield_deuteron"
+    SCINTILLATION_YIELD_TRITON = "scintillation_yield_triton"
     SCINTILLATION_YIELD_ION = "scintillation_yield_ion"
     SCINTILLATION_RESOLUTIONSCALE = "scintillation_resolutionscale"
+    SCINTILLATION_RISE_TIME_1 = "scintillation_rise_time_1" # currently unused
+    SCINTILLATION_RISE_TIME_2 = "scintillation_rise_time_2" # currently unused
+    SCINTILLATION_RISE_TIME_3 = "scintillation_rise_time_3" # currently unused
     # polarization
     PHASE_M12 = "phase_m12"
     PHASE_M22 = "phase_m22"
@@ -186,7 +230,12 @@ def checkMedium(
         # fmt: off
         lamMin, lamMax = medium.wavelengthRange
         assert lamMax >= lamMax
-        if (n := getTableData("refractive_index")) is not None:
+        # a medium with an extinction coefficient describes a conductor (metal);
+        # it does not transmit rays, so it needs neither group velocity nor n >= 1
+        isConductor = "extinction_coefficient" in medium.properties
+        if (kappa := getTableData("extinction_coefficient")) is not None:
+            assert np.min(kappa) >= 0.0, "Extinction coefficient must be non-negative!"
+        if (n := getTableData("refractive_index")) is not None and not isConductor:
             assert "group_velocity" in medium.properties, "Refractive index was specified, but no group velocity!"
             assert np.min(n) >= 1.0, "Refractive index must be at least 1.0!"
         if (vg := getTableData("group_velocity")) is not None:
@@ -227,32 +276,44 @@ def checkMedium(
             dq = np.abs(np.diff(quantiles))
             du = 1 / len(dq)
             assert np.allclose(dq, du, rtol=rtol, atol=atol), "Phase sampling function does not reproduce phase function!"
-        if (beta := getTableData("scintillation_spectrum_1_sampler")) is not None:
-            assert np.all(beta > 0.0), "Domain of scintillation spectrum sampler must be positive!"
-        if (beta := getTableData("scintillation_spectrum_2_sampler")) is not None:
-            assert np.all(beta > 0.0), "Domain of scintillation spectrum sampler must be positive!"
-        if (tau:= getFloatData("scintillation_time_constant_1")) is not None:
-            assert (tau >= 0.0), "Scintillation time constant must be non-negative!"
-        if (tau:= getFloatData("scintillation_time_constant_2")) is not None:
-            assert (tau >= 0.0), "Scintillation time constant must be non-negative!"
-        if (eta := getFloatData("scintillation_branching_ratio_electron")) is not None:
-            assert ((eta >= 0.0) & (eta <= 1.0)), "Scintillation branching ratio for electrons must be in [0,1]!"
-        if (eta := getFloatData("scintillation_branching_ratio_proton")) is not None:
-            assert ((eta >= 0.0) & (eta <= 1.0)), "Scintillation branching ratio for protons must be in [0,1]!"
-        if (eta := getFloatData("scintillation_branching_ratio_alpha")) is not None:
-            assert ((eta >= 0.0) & (eta <= 1.0)), "Scintillation branching ratio for alpha particles must be in [0,1]!"
-        if (eta := getFloatData("scintillation_branching_ratio_ion")) is not None:
-            assert ((eta >= 0.0) & (eta <= 1.0)), "Scintillation branching ratio for ions must be in [0,1]!"
-        if (y := getFloatData("scintillation_yield_electron")) is not None:
-            assert (y >= 0.0), "Scintillation yield for electrons must be non-negative!"
-        if (y := getFloatData("scintillation_yield_proton")) is not None:
-            assert (y >= 0.0), "Scintillation yield for protons must be non-negative!"
-        if (y := getFloatData("scintillation_yield_alpha")) is not None:
-            assert (y >= 0.0), "Scintillation yield for alpha particles must be non-negative!"
-        if (y := getFloatData("scintillation_yield_ion")) is not None:
-            assert (y >= 0.0), "Scintillation yield for ions must be non-negative!"
+        for n in (1, 2, 3):
+            name = f"scintillation_spectrum_{n}_sampler"
+            if (beta := getTableData(name)) is not None:
+                assert np.all(beta > 0.0), f'Domain of "{name}" must be positive!'
+        for particle, label in (
+            ("", ""),
+            ("_electron", " for electrons"),
+            ("_proton", " for protons"),
+            ("_alpha", " for alpha particles"),
+            ("_ion", " for ions"),
+            ("_deuteron", " for deuterons"),
+            ("_triton", " for tritons"),
+        ):
+            for n in (1, 2, 3):
+                name = f"scintillation_time_constant_{n}{particle}"
+                if (tau := getFloatData(name)) is not None:
+                    assert tau >= 0.0, f'Scintillation time constant{label} must be non-negative!'
+            for n in (1, 2, 3):
+                name = f"scintillation_branching_ratio_{n}{particle}"
+                if (eta := getFloatData(name)) is not None:
+                    assert 0.0 <= eta <= 1.0, f'Scintillation branching ratio{label} must be in [0,1]!'
+            names = [f"scintillation_branching_ratio_{n}{particle}" for n in (1, 2, 3)]
+            etas = [getFloatData(name) for name in names]
+            if None not in (etas[0], etas[1], etas[2]):
+                assert np.isclose(eta[0] + eta[1] + eta[2], 1.0, rtol=rtol, atol=atol)
+            elif None not in (etas[0], etas[1]):
+                assert np.isclose(eta[0] + eta[1], 1.0, rtol=rtol, atol=atol)
+            elif eta[0] is not None:
+                assert np.isclose(eta[0], 1.0, rtol=rtol, atol=atol)
+            name = f"scintillation_yield{particle}"
+            if (y := getFloatData(name)) is not None:
+                assert y >= 0.0, f'Scintillation yield{label} must be non-negative!'
         if (r := getFloatData("scintillation_resolutionscale")) is not None:
             assert (r >= 0.0), "Scintillation resolutionscale must be non-negative!"
+        for n in (1, 2, 3):
+            name = f"scintillation_rise_time_{n}"
+            if (t_rise := getFloatData(name)) is not None:
+                assert t_rise >= 0.0, f'Scintillation rise time "{name}" must be non-negative!'
         if( m12 := getTableData("phase_m12")) is not None:
             assert np.all((m12 >= -1.0) & (m12 <= 1.0)), "Mueller matrix must be normalized!"
         if (m22 := getTableData("phase_m22")) is not None:

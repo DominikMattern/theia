@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from collections.abc import Iterable
 from ctypes import Structure, c_float, c_uint32
@@ -13,7 +13,7 @@ from theia.material import Medium, MaterialStore
 import theia.units as u
 
 __all__ = [
-    "EnergyDepositionEvent",
+    "EnergyDepositionEvents",
     "ScintillationDepositionEventSource",
     "createTasksFromEvents",
 ]
@@ -24,23 +24,35 @@ def __dir__():
 
 
 @dataclass
-class EnergyDepositionEvent:
+class EnergyDepositionEvents:
     """
-    Data class to store energy deposition events in a form that is compatible
-    with the output of remage simulations.
+    Data class storing energy deposition events in a form that is compatible with 
+    the output of remage simulations.
+
+    Each instance describes all deposition steps within a single `medium`. Every
+    per-step quantity is stored as a NumPy array of equal length, with the k-th
+    entry across all arrays describing the k-th deposition step. The start and
+    end positions are split into separate arrays for each coordinate.
     """
-    eventId: int
+    eventId: np.ndarray
     medium: Medium
-    startPosition: tuple[float, float, float]  = (0.0, 0.0, 0.0)
-    endPosition: tuple[float, float, float]  = (0.0, 0.0, 0.0)
-    startTime: float = 0.0
-    startVelocity: float = 0.0
-    endVelocity: float = 0.0
-    energyDeposition: float = 1.0 * u.keV
-    particleCode: int = 11
+    startPositionX: np.ndarray
+    startPositionY: np.ndarray
+    startPositionZ: np.ndarray
+    endPositionX: np.ndarray
+    endPositionY: np.ndarray
+    endPositionZ: np.ndarray
+    startTime: np.ndarray
+    startVelocity: np.ndarray
+    endVelocity: np.ndarray
+    energyDeposition: np.ndarray
+    particleCode: np.ndarray
+
+    def __len__(self) -> int:
+        return len(self.eventId)
 
 
-def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
+def createTasksFromEvents(events: Iterable[EnergyDepositionEvents],
                           matStore: MaterialStore,
                           *,
                           eventsPerBatch: int = 1,
@@ -59,8 +71,9 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
 
     Parameters
     ----------
-    events: Iterable[EnergyDepositionEvent]
-        List of events to generate the tasks for.
+    events: Iterable[EnergyDepositionEvents]
+        Collection of event containers to generate the tasks for. Each container 
+        holds all deposition steps for a single medium.
     matStore: MaterialStore
         Material Store that is used for the simulation.
     eventsPerBatch: int, default=1
@@ -104,7 +117,7 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
 
     def _flush(group_key, batch, pad_to_full=False):
         nonlocal maxBatchSize
-        medIdx, eff_yield, tc, spec = group_info[group_key]
+        medIdx, eff_yield, tc, spec, medium = group_info[group_key]
         if pad_to_full:
             batch = batch + [_ZERO] * (eventsPerBatch - len(batch))
         task = {
@@ -120,11 +133,11 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
         if emitParticles:
             rng = np.random.default_rng(seed_sequence.spawn(1)[0])
             rdm = rng.normal(0, 1, eventsPerBatch)
-            expected_number = np.clip(np.asarray([e['energyDeposition'] for e in batch]) * eff_yield,0,None)
+            expected_number = np.asarray([e['energyDeposition'] for e in batch]) * eff_yield
             resolutionscale = 1.0
-            if "scintillation_resolutionscale" in event.medium.properties:
-                resolutionscale = event.medium.properties["scintillation_resolutionscale"].value[1]
-            number = np.round(expected_number + np.sqrt(expected_number) * resolutionscale * rdm)
+            if "scintillation_resolutionscale" in medium.properties:
+                resolutionscale = medium.properties["scintillation_resolutionscale"].value[1]
+            number = np.clip(np.round(expected_number + np.sqrt(expected_number) * resolutionscale * rdm),0,None)
             batchSize = int(np.sum(number))
             maxBatchSize = batchSize if batchSize > maxBatchSize else maxBatchSize
             task["lightSource__numPhotons"] = list(number)
@@ -135,52 +148,85 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvent],
         
         tasks.append(task)
 
-    def _add(group_key, edict, medIdx, eff_yield, tc, spec):
+    def _add(group_key, edict, medIdx, eff_yield, tc, spec, medium):
         if group_key not in accumulators:
             accumulators[group_key] = []
-            group_info[group_key] = (medIdx, eff_yield, tc, spec)
+            group_info[group_key] = (medIdx, eff_yield, tc, spec, medium)
         accumulators[group_key].append(edict)
         if len(accumulators[group_key]) == eventsPerBatch:
             _flush(group_key, accumulators.pop(group_key))
 
-    for event in events:
-        if event.particleCode == 11:
-            bR = event.medium.properties["scintillation_branching_ratio_electron"].value[1]
-            pY = event.medium.properties["scintillation_yield_electron"].value[1]
-        elif event.particleCode == 2212:
-            bR = event.medium.properties["scintillation_branching_ratio_proton"].value[1]
-            pY = event.medium.properties["scintillation_yield_proton"].value[1]
-        elif event.particleCode == 1000020040:
-            bR = event.medium.properties["scintillation_branching_ratio_alpha"].value[1]
-            pY = event.medium.properties["scintillation_yield_alpha"].value[1]
-        elif event.particleCode > 1000000000:
-            bR = event.medium.properties["scintillation_branching_ratio_ion"].value[1]
-            pY = event.medium.properties["scintillation_yield_ion"].value[1]
+    def _fetch_particle_type_dependent_props(particleCode, component):
+        if particleCode == 11 or particleCode == -11:
+            particle = "electron"
+        elif particleCode == 2212 or particleCode == -2212:
+            particle = "proton"
+        elif particleCode == 1000020040 or particleCode == -1000020040:
+            particle = "alpha"
+        elif particleCode == 1000010020 or particleCode == -1000010020:
+            particle = "deuteron"
+        elif particleCode == 1000010030 or particleCode == -1000010030:
+            particle = "triton"
+        elif particleCode > 1000000000 or particleCode < -1000000000:
+            particle = "ion"
         else:
-            print(f"Warning: Scintillation of particle with code {event.particleCode} not supported. "
+            print(f"Warning: Scintillation of particle with code {particleCode} not supported."
                   "This scintillation step will be skipped.")
-            continue
+            return None
+        
+        if f"scintillation_branching_ratio_{component}_{particle}" in medium.properties:
+            bR = medium.properties[f"scintillation_branching_ratio_{component}_{particle}"].value[1]
+        else:
+            bR = medium.properties[f"scintillation_branching_ratio_{component}"].value[1]
 
-        edict = {
-            'startPosition':    event.startPosition,
-            'endPosition':      event.endPosition,
-            'startTime':        event.startTime,
-            'startVelocity':    event.startVelocity,
-            'endVelocity':      event.endVelocity,
-            'energyDeposition': event.energyDeposition,
-        }
-        medIdx = matStore.media[event.medium.name]
+        if f"scintillation_yield_{particle}" in medium.properties:
+            pY = medium.properties[f"scintillation_yield_{particle}"].value[1]
+        else:
+            pY = medium.properties[f"scintillation_yield"].value[1]
 
-        tc1   = event.medium.properties["scintillation_time_constant_1"].value[1]
-        spec1 = event.medium.properties["scintillation_spectrum_1_sampler"].data
-        _add((event.medium.name, 1, event.particleCode), edict,
-             medIdx, pY * bR, tc1, spec1)
+        if f"scintillation_time_constant_{component}_{particle}" in medium.properties:
+            tC = medium.properties[f"scintillation_time_constant_{component}_{particle}"].value[1]
+        else:
+            tC = medium.properties[f"scintillation_time_constant_{component}"].value[1]
 
-        if bR < 1.0:
-            tc2   = event.medium.properties["scintillation_time_constant_2"].value[1]
-            spec2 = event.medium.properties["scintillation_spectrum_2_sampler"].data
-            _add((event.medium.name, 2, event.particleCode), edict,
-                 medIdx, pY * (1.0 - bR), tc2, spec2)
+        return bR, pY, tC
+
+    for evts in events:
+        medium = evts.medium
+        medIdx = matStore.media[medium.name]
+
+        for k in range(len(evts)):
+            particleCode = int(evts.particleCode[k])
+            props = _fetch_particle_type_dependent_props(particleCode, 1)
+            if props is None:
+                continue
+            else:
+                bR1, pY1, tC1 = props
+
+            edict = {
+                'startPosition':    (evts.startPositionX[k], evts.startPositionY[k], evts.startPositionZ[k]),
+                'endPosition':      (evts.endPositionX[k], evts.endPositionY[k], evts.endPositionZ[k]),
+                'startTime':        evts.startTime[k],
+                'startVelocity':    evts.startVelocity[k],
+                'endVelocity':      evts.endVelocity[k],
+                'energyDeposition': evts.energyDeposition[k],
+            }
+
+            spec = medium.properties["scintillation_spectrum_1_sampler"].data
+            _add((medium.name, 1, particleCode), edict,
+                 medIdx, pY1 * bR1, tC1, spec, medium)
+
+            if 1.0 - bR1 > 1e-5:
+                bR2, pY2, tC2 = _fetch_particle_type_dependent_props(particleCode, 2)
+                spec = medium.properties["scintillation_spectrum_2_sampler"].data
+                _add((medium.name, 2, particleCode), edict,
+                     medIdx, pY2 * bR2, tC2, spec, medium)
+                
+                if 1.0 - bR1 - bR2 > 1e-5:
+                    bR3, pY3, tC3 = _fetch_particle_type_dependent_props(particleCode, 3)
+                    spec = medium.properties["scintillation_spectrum_3_sampler"].data
+                    _add((medium.name, 3, particleCode), edict,
+                        medIdx, pY3 * bR3, tC3, spec, medium)
 
     for group_key, batch in accumulators.items():
         if padIncomplete:
