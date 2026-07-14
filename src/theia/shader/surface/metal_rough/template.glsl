@@ -88,8 +88,9 @@ SurfaceProperties prepareSurface(
                 dirReflected = lobeReflectedDir(lobes, ray.direction, hit.rayNrm, microfacetNormal, diffuseDir);
                 //check that reflected ray returns to the original medium
                 cond1 = (dot(dirReflected, hit.rayNrm) > 0);
-                //model-dependent validity check on the actual outgoing direction
-                cond2 = check_microfacet(dirReflected, microfacetNormal, hit, ray.direction, idx, dim);
+                //model-dependent validity check
+                vec3 dirReflectedMicrofacet = reflect(ray.direction, microfacetNormal);
+                cond2 = check_microfacet(dirReflectedMicrofacet, microfacetNormal, hit, ray.direction, idx, dim);
             }
 
             if (cond1 && cond2)
