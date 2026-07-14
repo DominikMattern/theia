@@ -3,7 +3,6 @@ from __future__ import annotations
 import hephaistos as hp
 import numpy as np
 from scipy.stats import norm
-from scipy.stats.sampling import NumericalInversePolynomial
 
 from ctypes import c_uint64
 from dataclasses import dataclass
@@ -372,24 +371,3 @@ def createSlotMacros(table: PropertyTable, prefix: str) -> dict[str, int]:
     # we are rather naive here for now and assume all slot names behave nicely
     getMacroName = lambda slot: prefix + "_" + slot.replace(" ", "_").upper()
     return {getMacroName(slot): idx for slot, idx in table.slots.items()}
-
-
-def RoughUnifiedSurfacePPFProperty(sigma: float, numSamples: int = 1024):
-    """
-    Util function to create the ppf property for the "gaussian" rough surface
-    model (`surface.DielectricRoughSurface(model="gaussian")`), which samples
-    micro-facets from a Gaussian slope distribution. This mirrors the
-    micro-facet sampling of the Geant4 UNIFIED model.
-    """
-    class Dist:
-        """Bundle fn into a class for use with scipy"""
-
-        def pdf(self, x):
-            return np.sin(x) * np.exp(-x**2 / (2 * sigma**2))
-
-    # invert cdf
-    inv_cdf = NumericalInversePolynomial(Dist(), domain=(0,np.pi/2))
-    # sample inverted cdf
-    u = np.linspace(0.0, 1.0, numSamples)
-    x = inv_cdf.ppf(u)
-    return TableProperty(Table(x))
