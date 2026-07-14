@@ -58,7 +58,7 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvents],
                           eventsPerBatch: int = 1,
                           padIncomplete: bool = True,
                           emitParticles: bool = False,
-                          RNGSeed: int | None = None,
+                          safetySigma: float = 5.0,
                           ) -> tuple[list[dict], int | None]:
     """
     Utility function to prepare the simulation of scintillation light. Takes
@@ -86,24 +86,28 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvents],
         segments when it has fewer than batchSize events. If `False`,
         incomplete last batches are discarded.
     emitParticles: bool, default=False
-        Whether to emit particles instead of rays. If `True` this will draw a
-        random number of photons per event based on the expected value and the
-        madium's resolution scale.
-    RNGSeed: int | None, default=None
-        The seed for the photon number RNG.
-    
+        Whether to emit particles instead of rays. If `True`, the photon number
+        per event is no longer drawn here but sampled at runtime by the
+        `ScintillationDepositionEventSource`; this function only writes the
+        energy deposition, effective yield and resolution scale into the tasks.
+    safetySigma: float, default=5.0
+        Number of standard deviations used to estimate a conservative upper
+        bound for `maxBatchSize` when `emitParticles` is `True`. Since the
+        actual photon number is sampled at runtime, the tracer capacity must be
+        sized to this bound to avoid exceeding it.
+
     Returns
     -------
     tasks: list[dict]
         List of tasks to give to the scheduler.
     maxBatchSize: int | None
-        If emitParticles is `True`, this gives the size of the largest batch.
+        If emitParticles is `True`, a conservative upper bound on the largest
+        batch's sampled photon number (see `safetySigma`). `None` otherwise.
 
     """
     tasks = []
     accumulators = {}   # group_key -> list of pending per-event dicts
     group_info = {}     # group_key -> (mediumIdx, effectiveYield, timeConstant, spectrumAddr)
-    seed_sequence = np.random.SeedSequence(RNGSeed)
     maxBatchSize = 0
 
     _ZERO = {
@@ -127,25 +131,23 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvents],
             "lightSource__startTime":        [e['startTime']        for e in batch],
             "lightSource__startVelocity":    [e['startVelocity']    for e in batch],
             "lightSource__endVelocity":      [e['endVelocity']      for e in batch],
+            "lightSource__energyDeposition": [e['energyDeposition'] for e in batch],
             "lightSource__timeConstant":     tc,
             "photons__spectrumTableAddress": spec,
+            "lightSource__photonYield":      eff_yield,
         }
         if emitParticles:
-            rng = np.random.default_rng(seed_sequence.spawn(1)[0])
-            rdm = rng.normal(0, 1, eventsPerBatch)
-            expected_number = np.asarray([e['energyDeposition'] for e in batch]) * eff_yield
             resolutionscale = 1.0
             if "scintillation_resolutionscale" in medium.properties:
                 resolutionscale = medium.properties["scintillation_resolutionscale"].value[1]
-            number = np.clip(np.round(expected_number + np.sqrt(expected_number) * resolutionscale * rdm),0,None)
-            batchSize = int(np.sum(number))
-            maxBatchSize = batchSize if batchSize > maxBatchSize else maxBatchSize
-            task["lightSource__numPhotons"] = list(number)
-            task["_batchSize"] = batchSize
-        else:
-            task["lightSource__energyDeposition"] = [e['energyDeposition'] for e in batch]
-            task["lightSource__photonYield"] = eff_yield
-        
+            task["lightSource__resolutionScale"] = resolutionscale
+            # the photon number is sampled at runtime by the light source; here
+            # we only estimate a conservative upper bound (per-event expected
+            # value plus safetySigma fluctuations) to size the tracer capacity
+            expected = np.sum(np.asarray([e['energyDeposition'] for e in batch])) * eff_yield
+            upperBound = np.round(expected + np.sqrt(expected) * resolutionscale * safetySigma)
+            maxBatchSize = upperBound if upperBound > maxBatchSize else maxBatchSize
+
         tasks.append(task)
 
     def _add(group_key, edict, medIdx, eff_yield, tc, spec, medium):
@@ -315,21 +317,22 @@ class ScintillationDepositionEventSource(LightSource):
     endVelocity: float | Iterable[float], default=0.0
         Particle velocity/velocities at the end of the track segment(s).
     energyDeposition: float | Iterable[float], default=1.0 keV
-        Energy deposited per segment. Will be ignored if `emitParticles` is `True`.
+        Energy deposited per track segment.
     photonYield: float, default=10000/MeV
-        Number of generated photons per deposited energy. Will be ignored if 
-        `emitParticles` is `True`.
+        Number of generated photons per deposited energy.
     timeConstant: float, default=0.0
         Time constant of the exponential decay.
     usePhotonCount: bool, default=True
         If `True` sampled radiance has units of number photons, otherwise eV.
     emitParticles: bool, default=False
-        Whether to emit particles instead of rays. If `True` the number of photons
-        specified in `numPhotons` will be sampled for each track segment.
-    numPhotons: int | Iterable[int], default=1
-        Number of photons to sample per event. The sum of these in a batch must
-        be equal to the batch size of the tracer. Will be ignored if `emitParticles`
-        is `False`.
+        Whether to emit particles instead of rays. If `True`, the number of
+        photons per track segment is sampled from the expected value 
+        (`energyDeposition * photonYield`) and `resolutionScale`.
+    resolutionScale: float, default=1.0
+        Scale of the statistical fluctuation of the sampled photon number. Only
+        used if `emitParticles` is `True`.
+    RNGSeed: int | None, default=None
+        Seed for the photon-number RNG used when `emitParticles` is `True`.
     """
 
     def __init__(
@@ -348,7 +351,8 @@ class ScintillationDepositionEventSource(LightSource):
         timeConstant: float = 0.0,
         usePhotonCount: bool = True,
         emitParticles: bool = False,
-        numPhotons: int | Iterable[int] = 1,
+        resolutionScale: float = 1.0,
+        RNGSeed: int | None = None,
     ) -> None:
         _FA = _make_float_array(eventsPerBatch)
         _V3A = _make_vec3_array(eventsPerBatch)
@@ -372,16 +376,18 @@ class ScintillationDepositionEventSource(LightSource):
             nRNGBackward=2 + addRNG,
             wavelengthSource=wavelengthSource,
             params={"LightParams": LightParams},
-            extra={"energyDeposition", "photonYield", "numPhotons"}
+            extra={"energyDeposition", "photonYield", "resolutionScale"}
         )
         # check params
         if emitParticles and not usePhotonCount:
             raise ValueError("Must use photon count when emitting particles")
 
         # save params
-        self._batchSize = eventsPerBatch
+        self._batchSize = None
+        self._eventsPerBatch = eventsPerBatch
         self._usePhotonCount = usePhotonCount
         self._emitParticles = emitParticles
+        self._rng = np.random.default_rng(RNGSeed)
 
         def _norm_vec3(v, name):
             """Normalize to a list of batchSize positions.
@@ -415,7 +421,6 @@ class ScintillationDepositionEventSource(LightSource):
         startVelocity    = _norm_float(startVelocity,   "startVelocity")
         endVelocity      = _norm_float(endVelocity,     "endVelocity")
         energyDeposition = _norm_float(energyDeposition,"energyDeposition")
-        numPhotons       = _norm_float(numPhotons,      "numPhotons")
 
         self.setParams(
             startPosition=startPosition,
@@ -427,13 +432,13 @@ class ScintillationDepositionEventSource(LightSource):
             energyDeposition=energyDeposition,
             photonYield=photonYield,
             timeConstant=timeConstant,
-            numPhotons=numPhotons,
+            resolutionScale=resolutionScale,
         )
 
     @property
-    def batchSize(self) -> int:
+    def eventsPerBatch(self) -> int:
         """The number of track segments in each batch."""
-        return self._batchSize
+        return self._eventsPerBatch
     
     @property
     def emitsParticles(self) -> bool:
@@ -450,7 +455,7 @@ class ScintillationDepositionEventSource(LightSource):
         if self.wavelengthSource is None:
             return None
         preamble = createPreamble(
-            BATCH_SIZE=self.batchSize,
+            BATCH_SIZE=self.eventsPerBatch,
             LIGHT_SOURCE_EMIT_PARTICLE=self.emitsParticles,
             SCINTILLATION_USE_ENERGY=not self.usePhotonCount,
         )
@@ -462,20 +467,36 @@ class ScintillationDepositionEventSource(LightSource):
         if self.emitsParticles:
             return None
         preamble = createPreamble(
-            BATCH_SIZE=self._batchSize,
+            BATCH_SIZE=self._eventsPerBatch,
             LIGHT_SOURCE_EMIT_PARTICLE=self.emitsParticles,
             SCINTILLATION_USE_ENERGY=not self.usePhotonCount,
         )
         code = loadShader("lightsource/scintillation/deposition_event/backward.glsl")
         return preamble + code
+
+    @property
+    def batchSize(self) -> int | None:
+        return self._batchSize
     
     def _finishParams(self, i: int) -> None:
         super()._finishParams(i)
         if self.emitsParticles:
-            numPhotons = self.getParam("numPhotons")
+            energyDeposition = np.asarray(self.getParam("energyDeposition"))
+            photonYield = self.getParam("photonYield")
+            resolutionScale = self.getParam("resolutionScale")
+            # sample the number of photons per event from the expected value and
+            # the medium's resolution scale (this is done in parallel to the previous
+            # GPU batch and should not slow down the simulation)
+            expected = energyDeposition * photonYield
+            rdm = self._rng.normal(0, 1, self._eventsPerBatch)
+            number = np.clip(
+                np.round(expected + np.sqrt(expected) * resolutionScale * rdm), 0, None
+            )
+            # expose the total sampled photon count as the dynamic batch size
+            # picked up by the tracer through the `batchSize` property
+            self._batchSize = int(np.sum(number))
             # compute culmulative number of photons for sampling
-            c = np.cumsum(numPhotons)
-            self.setParam("cumulativePhotonNumber", c)
+            self.setParam("cumulativePhotonNumber", np.cumsum(number))
         else:
             photonYield = self.getParam("photonYield")
             energyDeposition = self.getParam("energyDeposition")

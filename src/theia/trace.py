@@ -769,6 +769,9 @@ class VolumeForwardTracer(Tracer):
 
     def _finishParams(self, i: int) -> None:
         super()._finishParams(i)
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.batchSize = batchSize
         self.setParam("_maxDist", self.traceBBox.diagonal)
 
     def run(self, i: int) -> list[hp.Command]:
@@ -1023,6 +1026,9 @@ class VolumeBackwardTracer(Tracer):
 
     def _finishParams(self, i: int) -> None:
         super()._finishParams(i)
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.batchSize = batchSize
         self.setParam("_maxDist", self.traceBBox.diagonal)
 
     def run(self, i: int) -> list[hp.Command]:
@@ -1200,6 +1206,12 @@ class VolumeDirectTracer(Tracer):
         if self.target is not None:
             stages.insert(4, ("target", self.target))
         return stages
+    
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.batchSize = batchSize
 
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
@@ -1547,6 +1559,12 @@ class SceneDirectTracer(Tracer):
             ("response", self.response),
         ]
 
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.batchSize = batchSize
+
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
             stage.bindParams(self._pipeline, i)
@@ -1855,6 +1873,12 @@ class SceneBackwardTracer(Tracer):
             ("callback", self.callback),
             ("response", self.response),
         ]
+    
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.batchSize = batchSize
 
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
@@ -2174,6 +2198,13 @@ class _SceneTargetTracer(Tracer):
         ]
         # some stages may be None -> remove them
         return [s for s in stages if s[1] is not None]
+    
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        if isinstance(self.source, LightSource):
+            batchSize = self.source.batchSize
+            if batchSize is not None:
+                self.batchSize = batchSize
 
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():

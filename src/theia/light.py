@@ -489,6 +489,14 @@ class LightSource(PipelineStage):
         """Optional wavelength source used for sampling wavelengths"""
         return self._wavelengthSource
 
+    @property
+    def batchSize(self) -> int | None:
+        """
+        Used to update the batch size of the tracer. If `None`, the
+        batch size will stay the same.
+        """
+        return None
+
     def run(self, i: int) -> list[hp.Command]:
         # most light sources will not issue any commands
         # so an empty list is a sensible default
