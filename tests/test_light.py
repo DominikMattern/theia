@@ -12,10 +12,12 @@ from ctypes import Structure, c_float
 import theia.light
 import theia.units as u
 from theia.compiler import compileShader
+from theia.lookup import uploadTables
 from theia.material import MaterialStore, VACUUM_IDX
 from theia.model import PureWaterModel
 from theia.random import PhiloxRNG
 from theia.ray import UnpolarizedRay
+from theia.scintillation import ScintillationDepositionEventSource
 from theia.testing import BackwardLightSampler
 
 
@@ -194,6 +196,57 @@ def test_FunctionWavelengthSource():
     hist = hist / N
     F = Fn(edges)
     exp_hist = (F[1:] - F[:-1]) / exp_contrib
+    assert np.abs(hist - exp_hist).max() < 9e-4
+
+
+def test_SpectrumWavelengthSource():
+    N = 256 * 1024  # a bit more for the histogram
+    lamRange = (300.0, 700.0) * u.nm
+    sigma = 500.0 * u.nm
+    numSamples = 1024
+
+    # spectrum ~ x * gaussian: chosen because it integrates analytically, so we can
+    # build the exact percent point function (inverse CDF) table by hand and also
+    # have a closed-form CDF to check the sampled distribution against.
+    def f(lam):
+        return lam * np.exp(-(lam**2) / (2.0 * sigma**2))
+
+    def F(lam):  # antiderivative of f
+        return -(sigma**2) * np.exp(-(lam**2) / (2.0 * sigma**2))
+
+    Z = F(lamRange[1]) - F(lamRange[0])  # normalization
+
+    def cdf(lam):
+        return (F(lam) - F(lamRange[0])) / Z
+
+    def ppf(v):  # inverse CDF, solving F(lam) = F(a) + v * Z for lam
+        return np.sqrt(-2.0 * sigma**2 * np.log(-(F(lamRange[0]) + v * Z) / sigma**2))
+
+    # build the PPF look up table (indexed by u in [0, 1]) and upload it
+    u_grid = np.linspace(0.0, 1.0, numSamples)
+    table = ppf(u_grid)
+    tableMemory, [tableAddr] = uploadTables([table])
+
+    # create pipeline
+    ray = UnpolarizedRay()
+    philox = PhiloxRNG(key=0xC0FFEE)
+    photons = theia.light.SpectrumWavelengthSource(tableAddr)
+    light = theia.light.PencilLightSource(
+        photons, timeRange=(0.0, 0.0), mediumIdx=VACUUM_IDX
+    )
+    sampler = theia.light.LightSampler(N, light, ray, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+    result = sampler.queue.view(0)
+
+    # spectrum is treated as a normalized distribution -> contribution is 1.0
+    assert np.all(result["contrib"] == 1.0)
+    assert np.abs(np.min(result["wavelength"]) - lamRange[0]) < 1.0
+    assert np.abs(np.max(result["wavelength"]) - lamRange[1]) < 1.0
+    # check distribution via histogram against the analytic CDF
+    hist, edges = np.histogram(result["wavelength"], bins=40)
+    hist = hist / N
+    exp_hist = cdf(edges[1:]) - cdf(edges[:-1])
     assert np.abs(hist - exp_hist).max() < 9e-4
 
 
@@ -393,6 +446,353 @@ def test_SphericalLightSource_bwd():
     cos_nrm = np.abs(np.multiply(result["normal"], result["direction"]).sum(-1))
     exp_contrib = budget / (4.0 * np.pi * d**2)
     # bit larger error, likely precission issues (float vs double)
+    assert np.allclose(result["contrib"], exp_contrib, atol=1e-5)
+
+
+@pytest.mark.parametrize("particle", [True, False], ids=["particle", "ray"])
+def test_ScintillationDepositionEventSource_fwd(particle: bool):
+    N = 32 * 1024
+    posStart = (1.0, 2.0, 3.0) * u.m
+    posEnd = (4.0, -1.0, 5.0) * u.m
+    startTime = 5.0 * u.ns
+    startVelocity = 0.3 * u.c
+    endVelocity = 0.6 * u.c
+    energyDeposition = 1000.0 * u.keV
+    photonYield = 10.0 / u.keV
+    resolutionScale = 1.0
+    lam = 500.0 * u.nm
+
+    # create pipeline (emission is uniform in direction, like the spherical source)
+    ray = UnpolarizedRay(particle=particle)
+    philox = PhiloxRNG(key=0xC0FFEE)
+    photons = theia.light.ConstWavelengthSource(lam)
+    light = ScintillationDepositionEventSource(
+        photons,
+        mediumIdx=VACUUM_IDX,
+        startPosition=posStart,
+        endPosition=posEnd,
+        startTime=startTime,
+        startVelocity=startVelocity,
+        endVelocity=endVelocity,
+        energyDeposition=energyDeposition,
+        photonYield=photonYield,
+        timeConstant=0.0,  # no scintillation delay -> time follows only from the transit
+        emitParticles=particle,
+        resolutionScale=resolutionScale,
+        RNGSeed=0xABBA,
+    )
+    sampler = theia.light.LightSampler(N, light, ray, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+    result = sampler.queue.view(0)
+
+    expectedPhotons = energyDeposition * photonYield  # cumulative photon number
+
+    if particle:
+        # the number of drawn particles is sampled from a Gaussian around the
+        # expected photon number -> it must be plausible within 3 sigma
+        n = light.batchSize
+        sigma = np.sqrt(expectedPhotons) * resolutionScale
+        assert abs(n - expectedPhotons) < 3.0 * sigma
+        sl = slice(0, n)  # only these queue entries were written
+    else:
+        sl = slice(0, N)
+
+    pos = result["position"][sl]
+    direction = result["direction"][sl]
+    time = result["time"][sl]
+
+    assert np.all(result["wavelength"][sl] == lam)
+    assert np.all(result["mediumIdx"][sl] == VACUUM_IDX)
+    # uniform emission: unit directions that average to zero
+    assert np.allclose(np.sqrt(np.square(direction).sum(-1)), 1.0)
+    assert np.abs(np.mean(direction, axis=0)).max() < 0.03  # low statistics
+
+    # The random variable u along the track segment can be recovered two ways: from
+    # the distance to the start and from the distance to the end. Both must agree,
+    # which also confirms the sampled position actually lies on the segment.
+    pa = np.array(posStart)
+    pb = np.array(posEnd)
+    L = np.linalg.norm(pb - pa)
+    u_from_start = np.linalg.norm(pos - pa[None, :], axis=1) / L
+    u_from_end = 1.0 - np.linalg.norm(pos - pb[None, :], axis=1) / L
+    assert np.allclose(u_from_start, u_from_end, atol=1e-5)
+    assert u_from_start.min() > -1e-5 and u_from_start.max() < 1.0 + 1e-5
+
+    # with timeConstant = 0 the emission time is fully determined by startTime, u and
+    # the linearly interpolated (hence averaged) velocity along the segment
+    avg_velocity = startVelocity + u_from_start * (endVelocity - startVelocity) / 2.0
+    exp_time = startTime + u_from_start * L / np.maximum(avg_velocity, 1e-5)
+    assert np.allclose(time, exp_time, atol=1e-5)
+
+    if not particle:
+        # ray contribution = wavelength-source contribution (1) * cumulative photons
+        assert np.allclose(result["contrib"][sl], expectedPhotons)
+
+
+def test_ScintillationDepositionEventSource_timeConstant():
+    N = 256 * 1024  # a bit more for the histogram
+    posStart = (1.0, 2.0, 3.0) * u.m
+    posEnd = (4.0, -1.0, 5.0) * u.m
+    startTime = 5.0 * u.ns
+    startVelocity = 0.3 * u.c
+    endVelocity = 0.6 * u.c
+    timeConstant = 100.0 * u.ns
+    lam = 500.0 * u.nm
+
+    # create pipeline
+    ray = UnpolarizedRay()
+    philox = PhiloxRNG(key=0xC0FFEE)
+    photons = theia.light.ConstWavelengthSource(lam)
+    light = ScintillationDepositionEventSource(
+        photons,
+        mediumIdx=VACUUM_IDX,
+        startPosition=posStart,
+        endPosition=posEnd,
+        startTime=startTime,
+        startVelocity=startVelocity,
+        endVelocity=endVelocity,
+        energyDeposition=1000.0 * u.keV,
+        photonYield=10.0 / u.keV,
+        timeConstant=timeConstant,
+    )
+    sampler = theia.light.LightSampler(N, light, ray, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+    result = sampler.queue.view(0)
+
+    # subtract the (deterministic) transit time to isolate the scintillation delay,
+    # which is drawn from an exponential decay with mean timeConstant
+    pa = np.array(posStart)
+    pb = np.array(posEnd)
+    L = np.linalg.norm(pb - pa)
+    u_track = np.linalg.norm(result["position"] - pa[None, :], axis=1) / L
+    avg_velocity = startVelocity + u_track * (endVelocity - startVelocity) / 2.0
+    transit = startTime + u_track * L / np.maximum(avg_velocity, 1e-5)
+    delay = result["time"] - transit
+
+    assert delay.min() > -1e-5  # the delay is non-negative
+    # check the exponential decay via a histogram against the analytic CDF
+    hist, edges = np.histogram(delay, bins=40, range=(0.0, 6.0 * timeConstant))
+    hist = hist / N
+    cdf = 1.0 - np.exp(-edges / timeConstant)
+    exp_hist = cdf[1:] - cdf[:-1]
+    assert np.abs(hist - exp_hist).max() < 1.5e-3
+
+
+def test_ScintillationDepositionEventSource_bwd():
+    N = 32 * 256
+    posStart = (1.0, 2.0, 3.0) * u.m
+    posEnd = (4.0, -1.0, 5.0) * u.m
+    energyDeposition = 1000.0 * u.keV
+    photonYield = 10.0 / u.keV
+
+    # create pipeline (the wavelength source is supplied to the backward sampler)
+    ray = UnpolarizedRay()
+    philox = PhiloxRNG(key=0xC0FFEE)
+    photon = theia.light.ConstWavelengthSource()
+    light = ScintillationDepositionEventSource(
+        mediumIdx=VACUUM_IDX,
+        startPosition=posStart,
+        endPosition=posEnd,
+        startTime=5.0 * u.ns,
+        startVelocity=0.3 * u.c,
+        endVelocity=0.6 * u.c,
+        energyDeposition=energyDeposition,
+        photonYield=photonYield,
+        timeConstant=0.0,
+    )
+    sampler = BackwardLightSampler(N, light, ray, photon, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+
+    # check result
+    result = sampler.queue.view(0)
+    assert np.all(result["mediumIdx"] == VACUUM_IDX)
+    assert np.isfinite(result["observer"]).all()
+
+    # the emission position is sampled along the track segment (recoverable two ways)
+    pa = np.array(posStart)
+    pb = np.array(posEnd)
+    L = np.linalg.norm(pb - pa)
+    u_from_start = np.linalg.norm(result["position"] - pa[None, :], axis=1) / L
+    u_from_end = 1.0 - np.linalg.norm(result["position"] - pb[None, :], axis=1) / L
+    assert np.allclose(u_from_start, u_from_end, atol=1e-5)
+
+    # direction points from the (sampled) emission position toward the observer
+    exp_dir = result["observer"] - result["position"]
+    d = np.sqrt(np.square(exp_dir).sum(-1))
+    exp_dir /= d[:, None]
+    assert np.allclose(result["direction"], exp_dir, atol=1e-5)
+
+    cumPhotons = energyDeposition * photonYield
+    exp_contrib = cumPhotons / (4.0 * np.pi * d**2)
+    assert np.allclose(result["contrib"], exp_contrib, atol=1e-5)
+
+
+@pytest.mark.parametrize("particle", [True, False], ids=["particle", "ray"])
+def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
+    N = 32 * 1024
+    eventsPerBatch = 4
+    # four distinct, well-separated track segments with different energy depositions
+    starts = np.array(
+        [[1.0, 2.0, 3.0], [-2.0, 0.0, 1.0], [5.0, 5.0, -5.0], [0.0, -3.0, 4.0]]
+    ) * u.m
+    ends = np.array(
+        [[4.0, -1.0, 5.0], [0.0, 2.0, -1.0], [6.0, 7.0, -3.0], [-2.0, -1.0, 6.0]]
+    ) * u.m
+    startTime = np.array([5.0, 10.0, 2.0, 8.0]) * u.ns
+    startVelocity = np.array([0.3, 0.5, 0.2, 0.4]) * u.c
+    endVelocity = np.array([0.6, 0.5, 0.9, 0.4]) * u.c
+    energyDeposition = np.array([100.0, 200.0, 300.0, 400.0]) * u.keV
+    photonYield = 10.0 / u.keV
+    lam = 500.0 * u.nm
+
+    # create pipeline
+    ray = UnpolarizedRay(particle=particle)
+    philox = PhiloxRNG(key=0xC0FFEE)
+    photons = theia.light.ConstWavelengthSource(lam)
+    light = ScintillationDepositionEventSource(
+        photons,
+        mediumIdx=VACUUM_IDX,
+        eventsPerBatch=eventsPerBatch,
+        startPosition=starts.tolist(),
+        endPosition=ends.tolist(),
+        startTime=startTime.tolist(),
+        startVelocity=startVelocity.tolist(),
+        endVelocity=endVelocity.tolist(),
+        energyDeposition=energyDeposition.tolist(),
+        photonYield=photonYield,
+        timeConstant=0.0,
+        emitParticles=particle,
+        resolutionScale=0.0,  # makes the sampled photon numbers fully predictable
+        RNGSeed=0xABBA,
+    )
+    sampler = theia.light.LightSampler(N, light, ray, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+    result = sampler.queue.view(0)
+
+    seg = ends - starts
+    L = np.linalg.norm(seg, axis=1)
+    photonsPerEvent = energyDeposition * photonYield  # cumulative photon number steps
+
+    if particle:
+        # with resolutionScale = 0 the photon number per event is exactly the
+        # (rounded) expected value, so the drawn particle count is fully predictable
+        number = np.round(photonsPerEvent).astype(int)
+        cumulative = np.cumsum(number)
+        M = int(cumulative[-1])
+        assert light.batchSize == M
+        # the event of photon idx follows from the cumulative photon number
+        event = np.searchsorted(cumulative, np.arange(M), side="right")
+        assert [int(np.sum(event == k)) for k in range(eventsPerBatch)] == number.tolist()
+        sl = slice(0, M)
+    else:
+        # rays importance-sample an event; recover it as the segment the sampled
+        # position lies on (needed to check the per-event geometry below)
+        pos = result["position"]
+        u_proj = np.sum((pos[:, None, :] - starts[None]) * seg[None], axis=2) / (L**2)[None]
+        proj = starts[None] + u_proj[..., None] * seg[None]
+        resid = np.linalg.norm(pos[:, None, :] - proj, axis=2)
+        event = np.argmin(resid, axis=1)
+        assert resid[np.arange(N), event].max() < 1e-5  # position lies on a segment
+        sl = slice(0, N)
+
+    pos = result["position"][sl]
+    assert np.all(result["wavelength"][sl] == lam)
+    assert np.all(result["mediumIdx"][sl] == VACUUM_IDX)
+
+    # u recovered from the distance to start vs. to end must agree on the event's segment
+    u_from_start = np.linalg.norm(pos - starts[event], axis=1) / L[event]
+    u_from_end = 1.0 - np.linalg.norm(pos - ends[event], axis=1) / L[event]
+    assert np.allclose(u_from_start, u_from_end, atol=1e-5)
+
+    if particle:
+        # emission time from startTime, u and the averaged velocity along the segment
+        avg_velocity = (
+            startVelocity[event]
+            + u_from_start * (endVelocity[event] - startVelocity[event]) / 2.0
+        )
+        exp_time = startTime[event] + u_from_start * L[event] / np.maximum(avg_velocity, 1e-5)
+        assert np.allclose(result["time"][sl], exp_time, atol=1e-5)
+        # uniform emission direction
+        direction = result["direction"][sl]
+        assert np.allclose(np.sqrt(np.square(direction).sum(-1)), 1.0)
+        assert np.abs(np.mean(direction, axis=0)).max() < 0.03  # low statistics
+    else:
+        # ray contribution = total photon number summed over the whole batch
+        assert np.allclose(result["contrib"], photonsPerEvent.sum())
+
+
+def test_ScintillationDepositionEventSource_multiEvent_bwd():
+    N = 64 * 256
+    eventsPerBatch = 4
+    # four distinct, well-separated track segments with different energy depositions
+    starts = np.array(
+        [[1.0, 2.0, 3.0], [-2.0, 0.0, 1.0], [5.0, 5.0, -5.0], [0.0, -3.0, 4.0]]
+    ) * u.m
+    ends = np.array(
+        [[4.0, -1.0, 5.0], [0.0, 2.0, -1.0], [6.0, 7.0, -3.0], [-2.0, -1.0, 6.0]]
+    ) * u.m
+    startTime = np.array([5.0, 10.0, 2.0, 8.0]) * u.ns
+    startVelocity = np.array([0.3, 0.5, 0.2, 0.4]) * u.c
+    endVelocity = np.array([0.6, 0.5, 0.9, 0.4]) * u.c
+    energyDeposition = np.array([100.0, 200.0, 300.0, 400.0]) * u.keV
+    photonYield = 10.0 / u.keV
+
+    # create pipeline (backward mode uses its own BATCH_SIZE > 1 code path)
+    ray = UnpolarizedRay()
+    philox = PhiloxRNG(key=0xC0FFEE)
+    photon = theia.light.ConstWavelengthSource()
+    light = ScintillationDepositionEventSource(
+        mediumIdx=VACUUM_IDX,
+        eventsPerBatch=eventsPerBatch,
+        startPosition=starts.tolist(),
+        endPosition=ends.tolist(),
+        startTime=startTime.tolist(),
+        startVelocity=startVelocity.tolist(),
+        endVelocity=endVelocity.tolist(),
+        energyDeposition=energyDeposition.tolist(),
+        photonYield=photonYield,
+        timeConstant=0.0,
+    )
+    sampler = BackwardLightSampler(N, light, ray, photon, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+    result = sampler.queue.view(0)
+
+    assert np.all(result["mediumIdx"] == VACUUM_IDX)
+    assert np.isfinite(result["observer"]).all()
+
+    seg = ends - starts
+    L = np.linalg.norm(seg, axis=1)
+    photonsPerEvent = energyDeposition * photonYield
+
+    # each backward ray importance-samples an event; recover it from the segment
+    # the sampled position lies on
+    pos = result["position"]
+    u_proj = np.sum((pos[:, None, :] - starts[None]) * seg[None], axis=2) / (L**2)[None]
+    proj = starts[None] + u_proj[..., None] * seg[None]
+    resid = np.linalg.norm(pos[:, None, :] - proj, axis=2)
+    event = np.argmin(resid, axis=1)
+    assert resid[np.arange(N), event].max() < 1e-3  # position lies on a segment
+    # events are importance-sampled proportional to their photon number
+    frac = np.array([np.mean(event == k) for k in range(eventsPerBatch)])
+    assert np.allclose(frac, photonsPerEvent / photonsPerEvent.sum(), atol=0.02)
+    # u recovered from the distance to start vs. to end must agree on the segment
+    u_from_start = np.linalg.norm(pos - starts[event], axis=1) / L[event]
+    u_from_end = 1.0 - np.linalg.norm(pos - ends[event], axis=1) / L[event]
+    assert np.allclose(u_from_start, u_from_end, atol=1e-4)
+
+    # direction points from the (sampled) emission position toward the observer
+    exp_dir = result["observer"] - pos
+    d = np.sqrt(np.square(exp_dir).sum(-1))
+    exp_dir /= d[:, None]
+    assert np.allclose(result["direction"], exp_dir, atol=1e-5)
+
+    # contribution uses the total photon number over the whole batch (not per event)
+    exp_contrib = photonsPerEvent.sum() / (4.0 * np.pi * d**2)
     assert np.allclose(result["contrib"], exp_contrib, atol=1e-5)
 
 
