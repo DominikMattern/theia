@@ -3,27 +3,44 @@
 
 #include "math.glsl"
 
-//sampling of micro-facets from the Trowbridge-Reitz (GGX) distribution
-vec3 sample_microfacet_normal(vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
+/*
+Micro-facet parameters that are constant across a single surface interaction,
+i.e. do not depend on the sampled facet. They are computed once via
+prepare_microfacet() and then passed into sample_microfacet_normal() and
+check_microfacet() on every retry, so the loop-invariant roughness load and
+tangent basis are not recomputed per iteration of the rejection loop.
+*/
+struct MicrofacetParams {
+    float alpha;
+    vec3 tangent1;
+    vec3 tangent2;
+};
 
-    float alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
+MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
+    MicrofacetParams params;
+    params.alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
+    params.tangent1 = perpendicularTo(hit.rayNrm);
+    params.tangent2 = perpendicularTo(hit.rayNrm, params.tangent1);
+    return params;
+}
+
+//sampling of micro-facets from the Trowbridge-Reitz (GGX) distribution
+vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
 
     //sample angles (theta, phi)
     vec2 rdm = random2D(idx, dim);
-    float tan2_theta = alpha * alpha * rdm.x / (1 - rdm.x);
+    float tan2_theta = params.alpha * params.alpha * rdm.x / (1 - rdm.x);
     float phi = TWO_PI * rdm.y;
 
     float cos_theta = sqrt(1.0 / (1.0 + tan2_theta));
     float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
 
     //rotate surface normal
-    vec3 tangentialVector1 = perpendicularTo(hit.rayNrm);
-    vec3 tangentialVector2 = perpendicularTo(hit.rayNrm, tangentialVector1);
-    return cos_theta * hit.rayNrm + sin_theta * cos(phi) * tangentialVector1 + sin_theta * sin(phi) * tangentialVector2;
+    return cos_theta * hit.rayNrm + sin_theta * cos(phi) * params.tangent1 + sin_theta * sin(phi) * params.tangent2;
 }
 
 //check that ray hits micro-facet from the front
-bool check_microfacet(vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
+bool check_microfacet(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
     return (dot(rayDir, microfacetNormal) < 0.0);
 }
 

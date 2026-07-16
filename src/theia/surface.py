@@ -296,19 +296,19 @@ class MetalRoughSurface(SurfaceModel, name="metal_rough"):
         else:
             raise AttributeError(f"{model} is not a supported metal rough surface model.")
 
-        # Worst-case RNG draws for prepareSurface. The shared retry loop samples up
+                # Worst-case RNG draws for prepareSurface. The shared retry loop samples up
         # to 8 micro-facets; per retry it draws the facet-normal sampler + 1 (the
         # reflect/transmit decision) + check_microfacet. check_microfacet is free
         # (front-face test) for all models except "trowbridge_reitz_shadowed", which
         # rejection-samples the masking term and thus draws 1 extra per retry:
-        #   3 (lobe + diffuse presample) + 8 * (normal + 1 + check) + 1 (fallback)
-        #     beckmann / trowbridge_reitz : 8 * (2 + 1 + 0) + 4 = 28
-        #     trowbridge_reitz_shadowed   : 8 * (2 + 1 + 1) + 4 = 36
-        #     gaussian                    : 8 * (9 + 1 + 0) + 4 = 84
+        #   3 (lobe + diffuse presample) + 20 * (normal + 1 + check) + 1 (fallback)
+        #     beckmann / trowbridge_reitz : 20 * (2 + 1 + 0) + 4 = 64
+        #     trowbridge_reitz_shadowed   : 20 * (2 + 1 + 1) + 4 = 84
+        #     gaussian                    : 20 * (9 + 1 + 0) + 4 = 204
         # "gaussian" additionally rejection-samples the facet angle (up to 4 attempts
         # x 2 draws) inside its normal sampler.
         draws = SurfaceRNGDraws(
-            prepareSurface=84 if model == "gaussian" else 36 if model == "trowbridge_reitz_shadowed" else 28,
+            prepareSurface=204 if model == "gaussian" else 84 if model == "trowbridge_reitz_shadowed" else 64,
             sampleSurfaceInteraction=0,
             processSurfaceTargetHit=0,
         )
@@ -416,14 +416,14 @@ class DielectricRoughSurface(SurfaceModel, name="dielectric_rough"):
         # reflect/transmit decision) + check_microfacet. check_microfacet is free
         # (front-face test) for all models except "trowbridge_reitz_shadowed", which
         # rejection-samples the masking term and thus draws 1 extra per retry:
-        #   3 (lobe + diffuse presample) + 8 * (normal + 1 + check) + 1 (fallback)
-        #     beckmann / trowbridge_reitz : 8 * (2 + 1 + 0) + 4 = 28
-        #     trowbridge_reitz_shadowed   : 8 * (2 + 1 + 1) + 4 = 36
-        #     gaussian                    : 8 * (9 + 1 + 0) + 4 = 84
+        #   3 (lobe + diffuse presample) + 20 * (normal + 1 + check) + 1 (fallback)
+        #     beckmann / trowbridge_reitz : 20 * (2 + 1 + 0) + 4 = 64
+        #     trowbridge_reitz_shadowed   : 20 * (2 + 1 + 1) + 4 = 84
+        #     gaussian                    : 20 * (9 + 1 + 0) + 4 = 204
         # "gaussian" additionally rejection-samples the facet angle (up to 4 attempts
         # x 2 draws) inside its normal sampler.
         draws = SurfaceRNGDraws(
-            prepareSurface=84 if model == "gaussian" else 36 if model == "trowbridge_reitz_shadowed" else 28,
+            prepareSurface=204 if model == "gaussian" else 84 if model == "trowbridge_reitz_shadowed" else 64,
             sampleSurfaceInteraction=0,
             processSurfaceTargetHit=0,
         )

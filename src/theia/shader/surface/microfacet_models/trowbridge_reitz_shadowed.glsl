@@ -11,36 +11,57 @@ is described in [1].
 [1] Matt Pharr, Wenzel Jakob, and Greg Humphreys "Physically Based Rendering: From Theory To Implementation"
     (2023) https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory
 */
-vec3 sample_microfacet_normal(vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
+
+/*
+Micro-facet parameters that are constant across a single surface interaction,
+i.e. do not depend on the sampled facet. They are computed once via
+prepare_microfacet() and then passed into sample_microfacet_normal() and
+check_microfacet() on every retry, so the loop-invariant roughness load, the
+local coordinate system and the hemispherical-configuration basis are not
+recomputed per iteration of the rejection loop.
+*/
+struct MicrofacetParams {
+    float alpha;
+    mat3 trafo;     //local coordinate system (surface normal = z-axis)
+    vec3 wh;        //stretched incoming direction in hemispherical configuration
+    vec3 T1;        //orthonormal basis for the visible-normal disk sampling
+    vec3 T2;
+};
+
+MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
+    MicrofacetParams params;
+    params.alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
 
     //Transformation matrix for local coordinate system. The surface normal is the new z-axis, and the
     //tangential component of the incoming ray is along the new y-axis.
-    mat3 trafo = createLocalCOSY(hit.rayNrm, perpendicularTo(hit.rayNrm, rayDir));
+    params.trafo = createLocalCOSY(hit.rayNrm, perpendicularTo(hit.rayNrm, rayDir));
 
     float cos_n = abs(dot(hit.rayNrm, rayDir));
-    float alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
-
     //transform surface normal to hemispherical configuration, using (0, -sin_n, -cos_n) as incoming direction
-    vec3 wh = normalize(vec3(0.0, alpha * sqrt(max(1.0 - cos_n*cos_n, 0.0)), cos_n));
+    params.wh = normalize(vec3(0.0, params.alpha * sqrt(max(1.0 - cos_n*cos_n, 0.0)), cos_n));
 
     //contruct orthonormal basis such that T1 is perpenticular to the surface normal
-    vec3 T1 = vec3(-1.0, 0.0, 0.0);
-    vec3 T2 = crosser(wh, T1);
+    params.T1 = vec3(-1.0, 0.0, 0.0);
+    params.T2 = crosser(params.wh, params.T1);
+    return params;
+}
+
+vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
 
     //sample point on unit disk
     vec3 p = sampleUnitDisk(random2D(idx, dim));
 
     //warp hemispherical projection for visible normal sampling
     float h = sqrt(1 - p.x*p.x);
-    p.y = mix(h, p.y, (1.0 + wh.z) / 2.0);
+    p.y = mix(h, p.y, (1.0 + params.wh.z) / 2.0);
 
     //reproject to hemisphere and transform normal to ellipsoid configuration
     p.z = sqrt(max(0.0, 1.0 - dot(p,p)));
-    vec3 nh = p.x * T1 + p.y * T2 + p.z * wh;
-    vec3 microfacetNormal_local = normalize(vec3(alpha * nh.x, alpha * nh.y, max(1e-6, nh.z)));
+    vec3 nh = p.x * params.T1 + p.y * params.T2 + p.z * params.wh;
+    vec3 microfacetNormal_local = normalize(vec3(params.alpha * nh.x, params.alpha * nh.y, max(1e-6, nh.z)));
 
     //transform from local to global coordinate system
-    return trafo * microfacetNormal_local;
+    return params.trafo * microfacetNormal_local;
 }
 
 
@@ -58,10 +79,9 @@ float masking_function(float cos_n, float alpha){
 
 
 //rejection sample the masking
-bool check_microfacet(vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
+bool check_microfacet(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
     float u = random(idx, dim);
-    float alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
-    float mask = masking_function(abs(dot(dirOut, hit.rayNrm)), alpha);
+    float mask = masking_function(abs(dot(dirOut, hit.rayNrm)), params.alpha);
     return (mask > u);
 }
 

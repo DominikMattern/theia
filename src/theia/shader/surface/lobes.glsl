@@ -44,9 +44,10 @@ ReflectionLobes sampleReflectionLobes(const SurfaceHit hit, uint idx, inout uint
     lobes.doSpecularLobe = true;
     lobes.doDiffuseLobe = false;
     if (!isDefault) {
-        //check if probabilities add up to 1
-        if(abs(probBackScatter + probSpecularSpike + probSpecularLobe + probDiffuseLobe - 1) < 1e-4){
-            float probTotal = probBackScatter + probSpecularSpike + probSpecularLobe + probDiffuseLobe;
+        //normalize the probabilities so they sum to 1 (the cumulative thresholds
+        //below assume a normalized distribution). 
+        float probTotal = probBackScatter + probSpecularSpike + probSpecularLobe + probDiffuseLobe;
+        if (abs(1 - probTotal) > 1.0e-5) {
             probBackScatter /= probTotal;
             probSpecularSpike /= probTotal;
             probSpecularLobe /= probTotal;

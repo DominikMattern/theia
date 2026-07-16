@@ -18,6 +18,8 @@ using the complex refractive index of the metal medium (real part =
 `refractive_index`, imaginary part = `extinction_coefficient` of the other side).
 */
 
+#define SURFACE_MODEL_SPECULAR
+
 struct SurfaceProperties {
     float reflectance;
     vec3 dirReflected;
@@ -69,9 +71,14 @@ SurfaceProperties prepareSurface(
     bool doReflect = false;
 
     if (needMicrofacet) {
+        //compute the facet-independent micro-facet parameters once (roughness,
+        //tangent basis, ...) and reuse them across all retries
+        MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
+
         //sample micro-facets until a valid one is found (in most cases the first is valid)
-        for (int i = 0; i < 8; i++) {
-            vec3 microfacetNormal = sample_microfacet_normal(ray.direction, hit, idx, dim);
+        bool valid = false;
+        for (int i = 0; i < 20; i++) {
+            vec3 microfacetNormal = sample_microfacet_normal(mfParams, ray.direction, hit, idx, dim);
 
             //conductor Fresnel reflectance at the micro-facet (unless a reflectivity is given)
             float cos_i = abs(dot(ray.direction, microfacetNormal));
@@ -89,21 +96,24 @@ SurfaceProperties prepareSurface(
                 //check that reflected ray returns to the original medium
                 cond1 = (dot(dirReflected, hit.rayNrm) > 0);
                 //model-dependent validity check
-                vec3 dirReflectedMicrofacet = reflect(ray.direction, microfacetNormal);
-                cond2 = check_microfacet(dirReflectedMicrofacet, microfacetNormal, hit, ray.direction, idx, dim);
+                vec3 dirReflectedMicrofacet = lobes.doSpecularLobe ?
+                    dirReflected : reflect(ray.direction, microfacetNormal);
+                cond2 = check_microfacet(mfParams, dirReflectedMicrofacet, microfacetNormal, hit, ray.direction, idx, dim);
             }
 
-            if (cond1 && cond2)
+            if (cond1 && cond2) {
+                valid = true;
                 break;
-
-            //after 8 invalid micro-facets have been sampled, an unrotated facet is chosen to continue
-            if (i == 7) {
-                float cos_i2 = abs(dot(ray.direction, hit.rayNrm));
-                if (!hasReflectivity)
-                    r = fresnelConductor(cos_i2, n_i, n_o, k);
-                dirReflected = lobeReflectedDir(lobes, ray.direction, hit.rayNrm, hit.rayNrm, diffuseDir);
-                doReflect = random(idx, dim) < r;
             }
+        }
+
+        //no valid micro-facet after 20 attempts -> fall back to an unrotated facet (the surface normal)
+        if (!valid) {
+            float cos_i2 = abs(dot(ray.direction, hit.rayNrm));
+            if (!hasReflectivity)
+                r = fresnelConductor(cos_i2, n_i, n_o, k);
+            dirReflected = lobeReflectedDir(lobes, ray.direction, hit.rayNrm, hit.rayNrm, diffuseDir);
+            doReflect = random(idx, dim) < r;
         }
     }
     else {

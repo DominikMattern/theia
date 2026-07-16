@@ -1,5 +1,7 @@
 #include "surface/fresnel.glsl"
 
+#define SURFACE_MODEL_SPECULAR
+
 struct SurfaceProperties {
     float reflectance;
     bool doReflect;
