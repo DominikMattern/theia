@@ -624,6 +624,12 @@ class LightSampler(PipelineStage):
         stages.extend([self.source, self])
         return stages
 
+    def _finishParams(self, i: int) -> None:
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.setParam("_batchSize", batchSize)
+        super()._finishParams(i)
+
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():
             stage.bindParams(self._program, i)

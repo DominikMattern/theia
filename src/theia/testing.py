@@ -199,6 +199,12 @@ class BackwardLightSampler(PipelineStage):
         """
         return [self.rng, self.wavelengthSource, self.source, self]
 
+    def _finishParams(self, i: int) -> None:
+        batchSize = self.source.batchSize
+        if batchSize is not None:
+            self.setParam("_batchSize", batchSize)
+        super()._finishParams(i)
+
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():
             stage.bindParams(self._program, i)
@@ -846,6 +852,13 @@ class SurfaceInteractionSampler(PipelineStage):
         else:
             return [self.rng, self._photons, self.source, self]
 
+    def _finishParams(self, i: int) -> None:
+        if isinstance(self.source, LightSource):
+            batchSize = self.source.batchSize
+            if batchSize is not None:
+                self.setParam("_batchSize", batchSize)
+        super()._finishParams(i)
+
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():
             stage.bindParams(self._program, i)
@@ -1041,6 +1054,13 @@ class SurfaceScatteringSampler(PipelineStage):
         else:
             return [self.rng, self._photons, self.source, self]
 
+    def _finishParams(self, i: int) -> None:
+        if isinstance(self.source, LightSource):
+            batchSize = self.source.batchSize
+            if batchSize is not None:
+                self.setParam("_batchSize", batchSize)
+        super()._finishParams(i)
+
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():
             stage.bindParams(self._program, i)
@@ -1216,6 +1236,13 @@ class VolumeInteractionSampler(PipelineStage):
         else:
             return [self.rng, self._photons, self.source, self]
 
+    def _finishParams(self, i: int) -> None:
+        if isinstance(self.source, LightSource):
+            batchSize = self.source.batchSize
+            if batchSize is not None:
+                self.setParam("_batchSize", batchSize)
+        super()._finishParams(i)
+
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():
             stage.bindParams(self._program, i)
@@ -1385,6 +1412,13 @@ class VolumeScatteringSampler(PipelineStage):
             return [self.rng, self.source, self]
         else:
             return [self.rng, self._photons, self.source, self]
+
+    def _finishParams(self, i: int) -> None:
+        if isinstance(self.source, LightSource):
+            batchSize = self.source.batchSize
+            if batchSize is not None:
+                self.setParam("_batchSize", batchSize)
+        super()._finishParams(i)
 
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():
