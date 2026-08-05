@@ -1060,7 +1060,7 @@ def test_DielectricRoughSurface_diffuseLobe():
 
 
 # Gold optical constants around 600 nm (n + i*k)
-_GOLD_N, _GOLD_K = 0.27, 2.95
+_GOLD_N, _GOLD_K = 0.24, 2.92
 
 
 def _gold_medium():

@@ -23,6 +23,7 @@ from theia.compiler import createPreamble
 from theia.lookup import createTableFromFunction, Interpolation
 from theia.property import (
     FloatProperty,
+    MediumIndexProperty,
     Property,
     PropertyTable,
     PropertyTableEntry,
@@ -107,62 +108,23 @@ class OpticalProperties(str, Enum):
     EXTINCTION_COEFFICIENT = "extinction_coefficient"
     SCATTERING_COEF = "scattering_coef"
     # scintillation
+    # NOTE: Particle-dependent scintillation properties are keyed by appending
+    # the *absolute* PDG code of the particle as a suffix, e.g.
+    # "scintillation_yield_11" (electrons/positrons) or
+    # "scintillation_time_constant_1_1000020040" (alphas). These are looked up
+    # with a fallback to the generic (no-suffix) property, so only the generic
+    # variants are enumerated here; particle-specific keys are free-form.
     SCINTILLATION_SPECTRUM_1_SAMPLER = "scintillation_spectrum_1_sampler"
     SCINTILLATION_SPECTRUM_2_SAMPLER = "scintillation_spectrum_2_sampler"
     SCINTILLATION_SPECTRUM_3_SAMPLER = "scintillation_spectrum_3_sampler"
     SCINTILLATION_TIME_CONSTANT_1 = "scintillation_time_constant_1"
     SCINTILLATION_TIME_CONSTANT_2 = "scintillation_time_constant_2"
     SCINTILLATION_TIME_CONSTANT_3 = "scintillation_time_constant_3"
-    SCINTILLATION_TIME_CONSTANT_1_ELECTRON = "scintillation_time_constant_1_electron"
-    SCINTILLATION_TIME_CONSTANT_2_ELECTRON = "scintillation_time_constant_2_electron"
-    SCINTILLATION_TIME_CONSTANT_3_ELECTRON = "scintillation_time_constant_3_electron"
-    SCINTILLATION_TIME_CONSTANT_1_PROTON = "scintillation_time_constant_1_proton"
-    SCINTILLATION_TIME_CONSTANT_2_PROTON = "scintillation_time_constant_2_proton"
-    SCINTILLATION_TIME_CONSTANT_3_PROTON = "scintillation_time_constant_3_proton"
-    SCINTILLATION_TIME_CONSTANT_1_ALPHA = "scintillation_time_constant_1_alpha"
-    SCINTILLATION_TIME_CONSTANT_2_ALPHA = "scintillation_time_constant_2_alpha"
-    SCINTILLATION_TIME_CONSTANT_3_ALPHA = "scintillation_time_constant_3_alpha"
-    SCINTILLATION_TIME_CONSTANT_1_ION = "scintillation_time_constant_1_ion"
-    SCINTILLATION_TIME_CONSTANT_2_ION = "scintillation_time_constant_2_ion"
-    SCINTILLATION_TIME_CONSTANT_3_ION = "scintillation_time_constant_3_ion"
-    SCINTILLATION_TIME_CONSTANT_1_DEUTERON = "scintillation_time_constant_1_deuteron"
-    SCINTILLATION_TIME_CONSTANT_2_DEUTERON = "scintillation_time_constant_2_deuteron"
-    SCINTILLATION_TIME_CONSTANT_3_DEUTERON = "scintillation_time_constant_3_deuteron"
-    SCINTILLATION_TIME_CONSTANT_1_TRITON = "scintillation_time_constant_1_triton"
-    SCINTILLATION_TIME_CONSTANT_2_TRITON = "scintillation_time_constant_2_triton"
-    SCINTILLATION_TIME_CONSTANT_3_TRITON = "scintillation_time_constant_3_triton"
     SCINTILLATION_BRANCHING_RATIO_1 = "scintillation_branching_ratio_1"
     SCINTILLATION_BRANCHING_RATIO_2 = "scintillation_branching_ratio_2"
     SCINTILLATION_BRANCHING_RATIO_3 = "scintillation_branching_ratio_3"
-    SCINTILLATION_BRANCHING_RATIO_1_ELECTRON = "scintillation_branching_ratio_1_electron"
-    SCINTILLATION_BRANCHING_RATIO_2_ELECTRON = "scintillation_branching_ratio_2_electron"
-    SCINTILLATION_BRANCHING_RATIO_3_ELECTRON = "scintillation_branching_ratio_3_electron"
-    SCINTILLATION_BRANCHING_RATIO_1_PROTON = "scintillation_branching_ratio_1_proton"
-    SCINTILLATION_BRANCHING_RATIO_2_PROTON = "scintillation_branching_ratio_2_proton"
-    SCINTILLATION_BRANCHING_RATIO_3_PROTON = "scintillation_branching_ratio_3_proton"
-    SCINTILLATION_BRANCHING_RATIO_1_ALPHA = "scintillation_branching_ratio_1_alpha"
-    SCINTILLATION_BRANCHING_RATIO_2_ALPHA = "scintillation_branching_ratio_2_alpha"
-    SCINTILLATION_BRANCHING_RATIO_3_ALPHA = "scintillation_branching_ratio_3_alpha"
-    SCINTILLATION_BRANCHING_RATIO_1_ION = "scintillation_branching_ratio_1_ion"
-    SCINTILLATION_BRANCHING_RATIO_2_ION = "scintillation_branching_ratio_2_ion"
-    SCINTILLATION_BRANCHING_RATIO_3_ION = "scintillation_branching_ratio_3_ion"
-    SCINTILLATION_BRANCHING_RATIO_1_DEUTERON = "scintillation_branching_ratio_1_deuteron"
-    SCINTILLATION_BRANCHING_RATIO_2_DEUTERON = "scintillation_branching_ratio_2_deuteron"
-    SCINTILLATION_BRANCHING_RATIO_3_DEUTERON = "scintillation_branching_ratio_3_deuteron"
-    SCINTILLATION_BRANCHING_RATIO_1_TRITON = "scintillation_branching_ratio_1_triton"
-    SCINTILLATION_BRANCHING_RATIO_2_TRITON = "scintillation_branching_ratio_2_triton"
-    SCINTILLATION_BRANCHING_RATIO_3_TRITON = "scintillation_branching_ratio_3_triton"
     SCINTILLATION_YIELD = "scintillation_yield"
-    SCINTILLATION_YIELD_ELECTRON = "scintillation_yield_electron"
-    SCINTILLATION_YIELD_PROTON = "scintillation_yield_proton"
-    SCINTILLATION_YIELD_ALPHA = "scintillation_yield_alpha"
-    SCINTILLATION_YIELD_DEUTERON = "scintillation_yield_deuteron"
-    SCINTILLATION_YIELD_TRITON = "scintillation_yield_triton"
-    SCINTILLATION_YIELD_ION = "scintillation_yield_ion"
     SCINTILLATION_RESOLUTIONSCALE = "scintillation_resolutionscale"
-    SCINTILLATION_RISE_TIME_1 = "scintillation_rise_time_1" # currently unused
-    SCINTILLATION_RISE_TIME_2 = "scintillation_rise_time_2" # currently unused
-    SCINTILLATION_RISE_TIME_3 = "scintillation_rise_time_3" # currently unused
     # polarization
     PHASE_M12 = "phase_m12"
     PHASE_M22 = "phase_m22"
@@ -276,44 +238,40 @@ def checkMedium(
             dq = np.abs(np.diff(quantiles))
             du = 1 / len(dq)
             assert np.allclose(dq, du, rtol=rtol, atol=atol), "Phase sampling function does not reproduce phase function!"
-        for n in (1, 2, 3):
-            name = f"scintillation_spectrum_{n}_sampler"
-            if (beta := getTableData(name)) is not None:
-                assert np.all(beta > 0.0), f'Domain of "{name}" must be positive!'
-        for particle, label in (
-            ("", ""),
-            ("_electron", " for electrons"),
-            ("_proton", " for protons"),
-            ("_alpha", " for alpha particles"),
-            ("_ion", " for ions"),
-            ("_deuteron", " for deuterons"),
-            ("_triton", " for tritons"),
-        ):
-            for n in (1, 2, 3):
-                name = f"scintillation_time_constant_{n}{particle}"
+        # scintillation properties may carry a particle suffix: the absolute PDG
+        # code (e.g. "_11"), "_ion" (shared ion fallback), or none (generic).
+        # Validate every present variant regardless of its concrete suffix.
+        for name in list(medium.properties):
+            if re.fullmatch(r"scintillation_time_constant_\d(?:_\w+)?", name):
                 if (tau := getFloatData(name)) is not None:
-                    assert tau >= 0.0, f'Scintillation time constant{label} must be non-negative!'
-            for n in (1, 2, 3):
-                name = f"scintillation_branching_ratio_{n}{particle}"
+                    assert tau >= 0.0, f'Scintillation time constant "{name}" must be non-negative!'
+            elif re.fullmatch(r"scintillation_branching_ratio_\d(?:_\w+)?", name):
                 if (eta := getFloatData(name)) is not None:
-                    assert 0.0 <= eta <= 1.0, f'Scintillation branching ratio{label} must be in [0,1]!'
-            names = [f"scintillation_branching_ratio_{n}{particle}" for n in (1, 2, 3)]
-            etas = [getFloatData(name) for name in names]
-            if None not in (etas[0], etas[1], etas[2]):
-                assert np.isclose(eta[0] + eta[1] + eta[2], 1.0, rtol=rtol, atol=atol)
-            elif None not in (etas[0], etas[1]):
-                assert np.isclose(eta[0] + eta[1], 1.0, rtol=rtol, atol=atol)
-            elif eta[0] is not None:
-                assert np.isclose(eta[0], 1.0, rtol=rtol, atol=atol)
-            name = f"scintillation_yield{particle}"
-            if (y := getFloatData(name)) is not None:
-                assert y >= 0.0, f'Scintillation yield{label} must be non-negative!'
-        if (r := getFloatData("scintillation_resolutionscale")) is not None:
-            assert (r >= 0.0), "Scintillation resolutionscale must be non-negative!"
-        for n in (1, 2, 3):
-            name = f"scintillation_rise_time_{n}"
-            if (t_rise := getFloatData(name)) is not None:
-                assert t_rise >= 0.0, f'Scintillation rise time "{name}" must be non-negative!'
+                    assert 0.0 <= eta <= 1.0, f'Scintillation branching ratio "{name}" must be in [0, 1]!'
+            elif re.fullmatch(r"scintillation_yield(?:_\w+)?", name):
+                if (y := getFloatData(name)) is not None:
+                    assert y >= 0.0, f'Scintillation yield "{name}" must be non-negative!'
+            elif re.fullmatch(r"scintillation_resolutionscale(?:_\w+)?", name):
+                if (r := getFloatData(name)) is not None:
+                    assert r >= 0.0, f'Scintillation resolutionscale "{name}" must be non-negative!'
+            elif re.fullmatch(r"scintillation_spectrum_\d_sampler(?:_\w+)?", name):
+                if (beta := getTableData(name)) is not None:
+                    assert np.all(beta > 0.0), f'Domain of "{name}" must be positive!'
+            elif re.fullmatch(r"scintillation_rise_time_\d", name):
+                if (t_rise := getFloatData(name)) is not None:
+                    assert t_rise >= 0.0, f'Scintillation rise time "{name}" must be non-negative!'
+        # branching ratios must sum to 1 within each particle variant (suffix)
+        ratio_suffixes = set()
+        for name in medium.properties:
+            m = re.fullmatch(r"scintillation_branching_ratio_\d(_\w+)?", name)
+            if m is not None:
+                ratio_suffixes.add(m.group(1) or "")
+        for suffix in ratio_suffixes:
+            etas = [getFloatData(f"scintillation_branching_ratio_{n}{suffix}") for n in (1, 2, 3)]
+            present = [eta for eta in etas if eta is not None]
+            if present:
+                assert np.isclose(sum(present), 1.0, rtol=rtol, atol=atol), \
+                    f'Scintillation branching ratios (suffix "{suffix}") must sum to 1!'
         if( m12 := getTableData("phase_m12")) is not None:
             assert np.all((m12 >= -1.0) & (m12 <= 1.0)), "Mueller matrix must be normalized!"
         if (m22 := getTableData("phase_m22")) is not None:
@@ -422,6 +380,15 @@ class MaterialFlags(IntFlag):
     model.
     """
 
+    PORTAL = 0x400
+    """
+    Marks the surface as a portal: on crossing, the tracer switches the photon
+    to another acceleration structure (sub-scene) and re-expresses the ray in
+    that sub-scene's local coordinate frame. The crossing is medium-neutral (the
+    ray keeps its medium). Only the `MultiSceneForwardTracer` acts on this flag;
+    other tracers ignore it. Usually combined with `SKIP_MEDIA_MISMATCH_TEST`.
+    """
+
 
 _materialFlagsMap = {
     "B": MaterialFlags.BLACK_BODY,
@@ -441,6 +408,7 @@ _materialFlagsMap = {
     "Tf": MaterialFlags.NO_TRANSMIT_FWD,
     "V": MaterialFlags.VOLUME_BORDER,
     "*": MaterialFlags.SKIP_MEDIA_MISMATCH_TEST,
+    "P": MaterialFlags.PORTAL,
 }
 
 
@@ -824,8 +792,6 @@ def _createTableEntryFromMaterial(
         "inwards": MaterialInterfaceProperty(getIdx(inside), material.flagsInward),
         "outwards": MaterialInterfaceProperty(getIdx(outside), material.flagsOutward),
     }
-    # add additional material properties
-    props.update(material.properties)
     return props
 
 

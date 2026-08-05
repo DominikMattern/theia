@@ -459,8 +459,12 @@ def test_ScintillationDepositionEventSource_fwd(particle: bool):
     endVelocity = 0.6 * u.c
     energyDeposition = 1000.0 * u.keV
     photonYield = 10.0 / u.keV
-    resolutionScale = 1.0
     lam = 500.0 * u.nm
+
+    expectedPhotons = energyDeposition * photonYield
+    numPhotons = int(round(expectedPhotons))
+    if particle:
+        N = numPhotons
 
     # create pipeline (emission is uniform in direction, like the spherical source)
     ray = UnpolarizedRay(particle=particle)
@@ -478,25 +482,14 @@ def test_ScintillationDepositionEventSource_fwd(particle: bool):
         photonYield=photonYield,
         timeConstant=0.0,  # no scintillation delay -> time follows only from the transit
         emitParticles=particle,
-        resolutionScale=resolutionScale,
-        RNGSeed=0xABBA,
+        numPhotons=numPhotons,
     )
     sampler = theia.light.LightSampler(N, light, ray, rng=philox)
     # run
     runPipeline(sampler.collectStages())
     result = sampler.queue.view(0)
 
-    expectedPhotons = energyDeposition * photonYield  # cumulative photon number
-
-    if particle:
-        # the number of drawn particles is sampled from a Gaussian around the
-        # expected photon number -> it must be plausible within 3 sigma
-        n = light.batchSize
-        sigma = np.sqrt(expectedPhotons) * resolutionScale
-        assert abs(n - expectedPhotons) < 3.0 * sigma
-        sl = slice(0, n)  # only these queue entries were written
-    else:
-        sl = slice(0, N)
+    sl = slice(0, N)
 
     pos = result["position"][sl]
     direction = result["direction"][sl]
@@ -648,6 +641,14 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
     photonYield = 10.0 / u.keV
     lam = 500.0 * u.nm
 
+    photonsPerEvent = energyDeposition * photonYield
+    # in particle mode the sampler emits exactly sum(numPhotons) particles
+    number = np.round(photonsPerEvent).astype(int)
+    cumulative = np.cumsum(number)
+    M = int(cumulative[-1])
+    if particle:
+        N = M
+
     # create pipeline
     ray = UnpolarizedRay(particle=particle)
     philox = PhiloxRNG(key=0xC0FFEE)
@@ -656,17 +657,16 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
         photons,
         mediumIdx=VACUUM_IDX,
         eventsPerBatch=eventsPerBatch,
-        startPosition=starts.tolist(),
-        endPosition=ends.tolist(),
-        startTime=startTime.tolist(),
-        startVelocity=startVelocity.tolist(),
-        endVelocity=endVelocity.tolist(),
-        energyDeposition=energyDeposition.tolist(),
+        startPosition=starts,
+        endPosition=ends,
+        startTime=startTime,
+        startVelocity=startVelocity,
+        endVelocity=endVelocity,
+        energyDeposition=energyDeposition,
         photonYield=photonYield,
         timeConstant=0.0,
         emitParticles=particle,
-        resolutionScale=0.0,  # makes the sampled photon numbers fully predictable
-        RNGSeed=0xABBA,
+        numPhotons=number,
     )
     sampler = theia.light.LightSampler(N, light, ray, rng=philox)
     # run
@@ -675,16 +675,10 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
 
     seg = ends - starts
     L = np.linalg.norm(seg, axis=1)
-    photonsPerEvent = energyDeposition * photonYield  # cumulative photon number steps
 
     if particle:
-        # with resolutionScale = 0 the photon number per event is exactly the
-        # (rounded) expected value, so the drawn particle count is fully predictable
-        number = np.round(photonsPerEvent).astype(int)
-        cumulative = np.cumsum(number)
-        M = int(cumulative[-1])
-        assert light.batchSize == M
-        # the event of photon idx follows from the cumulative photon number
+        # the per-event photon number was supplied explicitly, so the event each
+        # photon idx belongs to follows deterministically from the cumulative counts
         event = np.searchsorted(cumulative, np.arange(M), side="right")
         assert [int(np.sum(event == k)) for k in range(eventsPerBatch)] == number.tolist()
         sl = slice(0, M)
@@ -748,12 +742,12 @@ def test_ScintillationDepositionEventSource_multiEvent_bwd():
     light = ScintillationDepositionEventSource(
         mediumIdx=VACUUM_IDX,
         eventsPerBatch=eventsPerBatch,
-        startPosition=starts.tolist(),
-        endPosition=ends.tolist(),
-        startTime=startTime.tolist(),
-        startVelocity=startVelocity.tolist(),
-        endVelocity=endVelocity.tolist(),
-        energyDeposition=energyDeposition.tolist(),
+        startPosition=starts,
+        endPosition=ends,
+        startTime=startTime,
+        startVelocity=startVelocity,
+        endVelocity=endVelocity,
+        energyDeposition=energyDeposition,
         photonYield=photonYield,
         timeConstant=0.0,
     )

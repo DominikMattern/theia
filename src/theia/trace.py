@@ -9,6 +9,7 @@ from hephaistos.pipeline import PipelineStage, SourceCodeMixin
 from ctypes import Structure, c_float, c_int32, c_uint32, c_uint64
 from ctypes import addressof, memset, sizeof
 from hephaistos.glsl import buffer_reference, vec3
+import numpy as np
 from numpy.ctypeslib import as_array
 
 from theia.camera import Camera
@@ -21,7 +22,7 @@ from theia.compiler import (
 )
 from theia.device import getEnabledRayTracingFeatures, isRayTracingEnabled
 from theia.light import LightSource, WavelengthSource
-from theia.material import MaterialStore
+from theia.material import MaterialStore, MaterialFlags
 from theia.random import RNG
 from theia.ray import RayModel
 from theia.response import HitResponse, TraceConfig
@@ -42,6 +43,7 @@ __all__ = [
     "EmptyEventCallback",
     "EventResultCode",
     "EventStatisticCallback",
+    "MultiSceneForwardTracer",
     "SceneBackwardTargetTracer",
     "SceneBackwardTracer",
     "SceneDirectTracer",
@@ -372,6 +374,8 @@ class Tracer(PipelineStage):
         maxPathLength: int,
         nRNGSamples: int,
         maxHitsPerRay: int,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
     ) -> None:
         super().__init__(params, extra)
 
@@ -386,6 +390,8 @@ class Tracer(PipelineStage):
         self._maxPathLength = maxPathLength
         self._nRNGSamples = nRNGSamples
         self._maxHitsPerRay = maxHitsPerRay
+        self._rayOffsetScale = rayOffsetScale
+        self._rayOffsetOrigin = rayOffsetOrigin
         self.batchSize = batchSize
         response.prepare(self._getTraceConfig(), ray)
 
@@ -426,6 +432,35 @@ class Tracer(PipelineStage):
     def maxPathLength(self) -> int:
         """Maximum length of ray paths sampled"""
         return self._maxPathLength
+
+    @property
+    def rayOffsetScale(self) -> float | None:
+        """
+        Override for the self-intersection offset applied to coordinates with 
+        (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default.
+        """
+        return self._rayOffsetScale
+
+    @property
+    def rayOffsetOrigin(self) -> float | None:
+        """
+        Override for the absolute self-intersection offset applied to coordinates 
+        with (`|coordinate| < 1/32`). `None` keeps the shader default.
+        """
+        return self._rayOffsetOrigin
+
+    def _rayOffsetMacros(self) -> dict[str, float]:
+        """
+        Preamble macros overriding the ray self-intersection offset. Contains
+        only the values explicitly set by the user; empty otherwise, in which
+        case the (recommended) shader defaults apply.
+        """
+        macros: dict[str, float] = {}
+        if self._rayOffsetScale is not None:
+            macros["RAY_OFFSET_SCALE"] = float(self._rayOffsetScale)
+        if self._rayOffsetOrigin is not None:
+            macros["RAY_OFFSET_ORIGIN"] = float(self._rayOffsetOrigin)
+        return macros
 
     @property
     def normalization(self) -> float:
@@ -768,9 +803,6 @@ class VolumeForwardTracer(Tracer):
         return stages
 
     def _finishParams(self, i: int) -> None:
-        batchSize = self.source.batchSize
-        if batchSize is not None:
-            self.batchSize = batchSize
         super()._finishParams(i)
         self.setParam("_maxDist", self.traceBBox.diagonal)
 
@@ -1025,9 +1057,6 @@ class VolumeBackwardTracer(Tracer):
         return stages
 
     def _finishParams(self, i: int) -> None:
-        batchSize = self.source.batchSize
-        if batchSize is not None:
-            self.batchSize = batchSize
         super()._finishParams(i)
         self.setParam("_maxDist", self.traceBBox.diagonal)
 
@@ -1206,12 +1235,6 @@ class VolumeDirectTracer(Tracer):
         if self.target is not None:
             stages.insert(4, ("target", self.target))
         return stages
-    
-    def _finishParams(self, i: int) -> None:
-        batchSize = self.source.batchSize
-        if batchSize is not None:
-            self.batchSize = batchSize
-        super()._finishParams(i)
 
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
@@ -1559,12 +1582,6 @@ class SceneDirectTracer(Tracer):
             ("response", self.response),
         ]
 
-    def _finishParams(self, i: int) -> None:
-        batchSize = self.source.batchSize
-        if batchSize is not None:
-            self.batchSize = batchSize
-        super()._finishParams(i)
-
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
             stage.bindParams(self._pipeline, i)
@@ -1622,6 +1639,27 @@ class SceneBackwardTracer(Tracer):
         Whether to ignore contributions from direct lighting, i.e. paths with
         no scattering. Usefull if a dedicated tracer or estimator for direct
         light contributions is additionally used.
+    rayOffsetScale: float | None, default=None
+        Optional override for the self-intersection offset applied to coordinates
+        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
+        (`256.0`).
+
+        Upon hitting a surface the ray is offset towards the new volume to avoid
+        self-intersection due to numerical inaccuracies. The default value is
+        known to be a robust safeguard against self-intersection, but it is very
+        conservative. For thin volumes choosing a smaller offset might improve
+        the quality of the simulation.
+
+        !!! warning
+
+            Decreasing this value might introduce self-intersection artifacts.
+            This should only be done when necessary and with caution.
+    rayOffsetOrigin: float | None, default=None
+        Optional override for the absolute self-intersection offset applied to 
+        coordinates with (`|coordinate| < 1/32`). `None` keeps the shader default
+        (`1/65536`). 
+
+        See also `rayOffsetScale`.
 
     Stage Parameters
     ----------------
@@ -1670,6 +1708,8 @@ class SceneBackwardTracer(Tracer):
         sampleCoefficient: float = float("NaN"),
         maxTime: float = float("inf"),
         disableDirectLighting: bool = False,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
     ) -> None:
         # we need ray tracing for this
         if not isRayTracingEnabled():
@@ -1713,6 +1753,8 @@ class SceneBackwardTracer(Tracer):
             maxPathLength=maxPathLength,
             nRNGSamples=nRNG,
             maxHitsPerRay=maxHitsPerRay,
+            rayOffsetScale=rayOffsetScale,
+            rayOffsetOrigin=rayOffsetOrigin,
         )
         # save params
         self._photons = wavelengthSource
@@ -1747,6 +1789,7 @@ class SceneBackwardTracer(Tracer):
             PROXY_RAY="BackwardRay",
             RAY_TRACING_PIPELINE=True,
             TRACE_RNG_STRIDE=nRngLoop,
+            **self._rayOffsetMacros(),
         )
         headers = {
             "callback.glsl": callback.sourceCode,
@@ -1873,12 +1916,6 @@ class SceneBackwardTracer(Tracer):
             ("callback", self.callback),
             ("response", self.response),
         ]
-    
-    def _finishParams(self, i: int) -> None:
-        batchSize = self.source.batchSize
-        if batchSize is not None:
-            self.batchSize = batchSize
-        super()._finishParams(i)
 
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
@@ -1932,6 +1969,9 @@ class _SceneTargetTracer(Tracer):
         maxTime: float,
         targetGuide: TargetGuide | None,
         disableDirectLighting: bool,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
+        subScenes: Sequence[Scene] | None = None,
     ) -> None:
         # we need ray tracing for this
         if not isRayTracingEnabled():
@@ -1982,6 +2022,8 @@ class _SceneTargetTracer(Tracer):
             maxPathLength=maxPathLength,
             nRNGSamples=nRNG,
             maxHitsPerRay=maxPathLength - 1 if disableDirectLighting else maxPathLength,
+            rayOffsetScale=rayOffsetScale,
+            rayOffsetOrigin=rayOffsetOrigin,
         )
         # save params
         self._source = source
@@ -2002,6 +2044,20 @@ class _SceneTargetTracer(Tracer):
             _rayCountZ=1,
         )
 
+        # portal / multi-scene setup (see MultiSceneForwardTracer)
+        self._subScenes = list(subScenes) if subScenes else []
+        if self._subScenes:
+            if direction != "forward":
+                raise ValueError(
+                    "Sub-scenes (portals) are only supported for forward tracing"
+                )
+            if targetGuide is not None:
+                raise ValueError(
+                    "Next-event estimation (targetGuide) is not yet supported "
+                    "with sub-scenes"
+                )
+            self._buildPortalTables(scene)
+
         # prepare code compilation
         # if we have only a single volume model (besides transparent) we can
         # inline the volume module and skip unnecessary creation of callables
@@ -2017,6 +2073,8 @@ class _SceneTargetTracer(Tracer):
             PROXY_RAY=f"{direction.title()}Ray",
             RAY_TRACING_PIPELINE=True,
             TRACE_RNG_STRIDE=nRngLoop,
+            **self._rayOffsetMacros(),
+            **self._portalMacros(),
         )
         headers = {
             "callback.glsl": callback.sourceCode,
@@ -2068,6 +2126,219 @@ class _SceneTargetTracer(Tracer):
         maxRecursion = 1 if targetGuide is None else 2
         self._pipeline, self._sbt = builder.finish(maxRecursionDepth=maxRecursion)
         scene.bindParams(self._pipeline)
+        self._bindPortalTables(self._pipeline)
+
+    # ----- portal / multi-scene hooks ------------------------------------- #
+    def _portalMacros(self) -> dict:
+        """Preamble macros enabling portal support, or empty if no sub-scenes."""
+        return {"RAY_PORTAL": True} if self._subScenes else {}
+
+    @staticmethod
+    def _splitAddr(address: int) -> tuple[int, int]:
+        """Split a 64-bit device address into (lo, hi) uint32 (a uvec2)."""
+        return (address & 0xFFFFFFFF, (address >> 32) & 0xFFFFFFFF)
+
+    def _portalScenes(self, scene: Scene) -> list[Scene]:
+        """All scenes in sceneId order: main (0) followed by the sub-scenes."""
+        return [scene, *self._subScenes]
+
+    @staticmethod
+    def _portalInstanceLocations(scenes: Sequence[Scene]) -> dict[int, tuple[int, int]]:
+        """Map id(MeshInstance) -> (sceneId, gl_InstanceID) across all scenes."""
+        loc: dict[int, tuple[int, int]] = {}
+        for sid, sc in enumerate(scenes):
+            for iid, inst in enumerate(sc.instances):
+                loc[id(inst)] = (sid, iid)
+        return loc
+
+    def _validatePortals(self, scene: Scene) -> None:
+        """
+        Validate the portal transition FSM and raise a clear error on misuse:
+          - a portal instance is one with setPortalLinks; its material MUST carry
+            the PORTAL flag on both sides (and vice versa) so the shader's
+            MATERIAL_PORTAL_BIT gate matches the transition tables,
+          - the main scene defines at least one portal,
+          - all portals within a scene declare the same number of contexts,
+          - every link targets a portal instance in some scene, with a matching
+            mesh key and an in-range nextInstanceId (closed, total FSM),
+          - the net cross-portal map M = T_arrival . T_source^-1 is a rigid
+            isometry (matched scale on both boxes).
+        """
+        scenes = self._portalScenes(scene)
+        matTable = scene.materials.materials  # PropertyTable of the shared MaterialStore
+        loc = self._portalInstanceLocations(scenes)
+
+        def _hasPortalFlag(name: str) -> bool:
+            # read the per-direction flags from the compiled material table
+            entry = matTable.entries[name]
+            return bool(entry["inwards"].flags & MaterialFlags.PORTAL) and bool(
+                entry["outwards"].flags & MaterialFlags.PORTAL
+            )
+
+        # portals per scene + per-scene context count (uniform across its portals).
+        # A portal is identified by portalLinks; enforce links <-> PORTAL flag so a
+        # PORTAL-flagged surface without links (or vice versa) is caught early.
+        portalsPerScene: list[list] = []
+        contextCount: list[int] = []
+        for sid, sc in enumerate(scenes):
+            portals = []
+            for inst in sc.instances:
+                hasLinks = inst.portalLinks is not None
+                hasFlag = _hasPortalFlag(inst.material)
+                if hasLinks != hasFlag:
+                    raise ValueError(
+                        f"Inconsistent portal in scene {sid}: instance material "
+                        f"{inst.material!r} "
+                        + (
+                            "has setPortalLinks but its material lacks the PORTAL "
+                            "flag on both sides"
+                            if hasLinks
+                            else "carries the PORTAL flag but has no setPortalLinks"
+                        )
+                        + " - a portal needs both."
+                    )
+                if hasLinks:
+                    portals.append(inst)
+            portalsPerScene.append(portals)
+            lens = {len(p.portalLinks) for p in portals}
+            if len(lens) > 1:
+                raise ValueError(
+                    f"Portals in scene {sid} declare differing context counts "
+                    f"{sorted(lens)}; every portal must define a transition for "
+                    "every context of its scene."
+                )
+            contextCount.append(lens.pop() if portals else 0)
+        if sum(len(p) for p in portalsPerScene) == 0:
+            raise ValueError(
+                "Sub-scenes given but no portals defined (use "
+                "MeshStore.createPortal + MeshInstance.setPortalLinks)."
+            )
+        if len(portalsPerScene[0]) == 0:
+            raise ValueError(
+                "The main scene defines no portals (use MeshStore.createPortal)."
+            )
+
+        # validate every link (target existence, mesh key, range, rigid net map)
+        eye3 = np.eye(3)
+        for sid, portals in enumerate(portalsPerScene):
+            for p in portals:
+                Lsrc = p.transform.numpy()[:, :3]
+                try:
+                    LsrcInv = np.linalg.inv(Lsrc)
+                except np.linalg.LinAlgError:
+                    raise ValueError(
+                        f"A portal transform in scene {sid} is singular."
+                    )
+                for ctx, (arrival, nextId) in enumerate(p.portalLinks):
+                    if id(arrival) not in loc:
+                        raise ValueError(
+                            f"Portal link in scene {sid} (context {ctx}) targets an "
+                            "instance that is not part of the main scene or any "
+                            "sub-scene."
+                        )
+                    if arrival.portalLinks is None:
+                        raise ValueError(
+                            f"Portal link in scene {sid} (context {ctx}) targets a "
+                            "non-portal instance (it has no setPortalLinks)."
+                        )
+                    dstScene, _ = loc[id(arrival)]
+                    if not (0 <= int(nextId) < contextCount[dstScene]):
+                        raise ValueError(
+                            f"Portal link in scene {sid} (context {ctx}) targets "
+                            f"context {nextId} of scene {dstScene}, which has "
+                            f"{contextCount[dstScene]} context(s)."
+                        )
+                    if p.portalMeshKey != arrival.portalMeshKey:
+                        raise ValueError(
+                            f"Linked portal boxes must share the same mesh "
+                            f"({p.portalMeshKey!r} -> {arrival.portalMeshKey!r})."
+                        )
+                    Larr = arrival.transform.numpy()[:, :3]
+                    Mlin = Larr @ LsrcInv
+                    if not np.allclose(Mlin @ Mlin.T, eye3, atol=1e-4):
+                        raise ValueError(
+                            f"Portal link in scene {sid} (context {ctx}) has a "
+                            "non-rigid net map: source and arrival box scales "
+                            "differ. Linked boxes must have matching scale."
+                        )
+
+    def _buildPortalTables(self, scene: Scene) -> None:
+        """
+        Build the SSBOs read by portal.glsl:
+          - SubTlasTable / SubObjectIdTable: sub-scene TLAS / ObjectIdMap device
+            addresses, indexed by (sceneId - 1) (main excluded);
+          - PortalIndexTable / TransitionTable: per-scene (indexed by sceneId,
+            main at 0) device addresses of the gl_InstanceID -> portal-index map
+            and the flattened transition table (14 uint words per record:
+            nextScene, nextInstanceId, then a mat4x3 as 12 column-major floats);
+          - PortalMetaTable: per-scene portal count (transition-table row stride).
+        """
+        self._validatePortals(scene)
+        scenes = self._portalScenes(scene)
+        loc = self._portalInstanceLocations(scenes)
+
+        # sub-scene addresses, indexed by (sceneId - 1)
+        subTlas = np.array(
+            [self._splitAddr(s.tlas.address) for s in self._subScenes],
+            dtype=np.uint32,
+        ).reshape(-1)
+        subObjId = np.array(
+            [self._splitAddr(s.objectIdMapTensor.address) for s in self._subScenes],
+            dtype=np.uint32,
+        ).reshape(-1)
+
+        keep: list = []  # keep the per-scene tensors alive (their addresses are used)
+        portalIndexAdr: list = []
+        transAdr: list = []
+        portalCounts: list[int] = []
+        for sc in scenes:
+            insts = sc.instances
+            idxMap = np.full(len(insts), -1, dtype=np.int32)
+            portals = []
+            for iid, inst in enumerate(insts):
+                if inst.portalLinks is not None:
+                    idxMap[iid] = len(portals)
+                    portals.append(inst)
+            P = len(portals)
+            portalCounts.append(P)
+            idxT = hp.Tensor(np.ascontiguousarray(idxMap))
+            keep.append(idxT)
+            portalIndexAdr.append(self._splitAddr(idxT.address))
+
+            # transition table: rows = contexts, cols = P, 14 uint words per record
+            C = len(portals[0].portalLinks) if P > 0 else 0
+            records = np.zeros((max(C * P, 1), 14), dtype=np.uint32)
+            for p_idx, p in enumerate(portals):
+                for ctx, (arrival, nextId) in enumerate(p.portalLinks):
+                    dstScene, _ = loc[id(arrival)]
+                    A = arrival.transform.numpy()  # (3,4) float32
+                    T = np.ascontiguousarray(A.T, dtype=np.float32).reshape(-1)
+                    r = ctx * P + p_idx
+                    records[r, 0] = np.uint32(dstScene)
+                    records[r, 1] = np.uint32(int(nextId))
+                    records[r, 2:14] = T.view(np.uint32)
+            transT = hp.Tensor(np.ascontiguousarray(records.reshape(-1)))
+            keep.append(transT)
+            transAdr.append(self._splitAddr(transT.address))
+
+        self._portalKeepAlive = keep
+        self._portalTensors = {
+            "SubTlasTable": hp.Tensor(np.ascontiguousarray(subTlas)),
+            "SubObjectIdTable": hp.Tensor(np.ascontiguousarray(subObjId)),
+            "PortalIndexTable": hp.Tensor(
+                np.ascontiguousarray(np.array(portalIndexAdr, dtype=np.uint32).reshape(-1))
+            ),
+            "TransitionTable": hp.Tensor(
+                np.ascontiguousarray(np.array(transAdr, dtype=np.uint32).reshape(-1))
+            ),
+            "PortalMetaTable": hp.Tensor(
+                np.ascontiguousarray(np.array(portalCounts, dtype=np.int32))
+            ),
+        }
+
+    def _bindPortalTables(self, program) -> None:
+        if self._subScenes:
+            program.bindParams(**self._portalTensors)
 
     @Tracer.batchSize.setter
     def batchSize(self, value) -> None:
@@ -2198,13 +2469,6 @@ class _SceneTargetTracer(Tracer):
         ]
         # some stages may be None -> remove them
         return [s for s in stages if s[1] is not None]
-    
-    def _finishParams(self, i: int) -> None:
-        if isinstance(self.source, LightSource):
-            batchSize = self.source.batchSize
-            if batchSize is not None:
-                self.batchSize = batchSize
-        super()._finishParams(i)
 
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
@@ -2265,6 +2529,27 @@ class SceneForwardTracer(_SceneTargetTracer):
         Whether to ignore contributions from direct lighting, i.e. paths with
         no scattering. Usefull if a dedicated tracer or estimator for direct
         light contributions is additionally used.
+    rayOffsetScale: float | None, default=None
+        Optional override for the self-intersection offset applied to coordinates
+        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
+        (`256.0`).
+    
+        Upon hitting a surface the ray is offset towards the new volume to avoid
+        self-intersection due to numerical inaccuracies. The default value is
+        known to be a robust safeguard against self-intersection, but it is very
+        conservative. For thin volumes choosing a smaller offset might improve
+        the quality of the simulation.
+    
+        !!! warning
+    
+            Decreasing this value might introduce self-intersection artifacts.
+            This should only be done when necessary and with caution.
+    rayOffsetOrigin: float | None, default=None
+        Optional override for the absolute self-intersection offset applied to 
+        coordinates with (`|coordinate| < 1/32`). `None` keeps the shader default
+        (`1/65536`). 
+    
+        See also `rayOffsetScale`.
     """
 
     name = "Scene Forward Tracer"
@@ -2286,6 +2571,8 @@ class SceneForwardTracer(_SceneTargetTracer):
         maxTime: float = float("inf"),
         targetGuide: TargetGuide | None = None,
         disableDirectLighting: bool = False,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
     ) -> None:
         super().__init__(
             batchSize,
@@ -2303,6 +2590,8 @@ class SceneForwardTracer(_SceneTargetTracer):
             maxTime=maxTime,
             targetGuide=targetGuide,
             disableDirectLighting=disableDirectLighting,
+            rayOffsetScale=rayOffsetScale,
+            rayOffsetOrigin=rayOffsetOrigin,
         )
         self._lightSource = source
 
@@ -2310,6 +2599,87 @@ class SceneForwardTracer(_SceneTargetTracer):
     def source(self) -> LightSource:
         """Source producing rays"""
         return self._lightSource
+
+
+class MultiSceneForwardTracer(_SceneTargetTracer):
+    """
+    Forward scene tracer that also traces one or more SUB-scenes in their own
+    LOCAL coordinate frames, entered through portal bounding boxes. This resolves
+    fine geometry (e.g. thin fibers) placed far from the world origin, where
+    single-precision world coordinates lose resolution.
+
+    Identical to `SceneForwardTracer` plus a `subScenes` argument. Define portals
+    with `MeshStore.createPortal` (which assigns the built-in `PORTAL_MATERIAL`):
+    each main-scene portal box carries a `target` sub-scene id (1-based) and its
+    rigid world transform; each sub-scene contains the same box at identity plus
+    the fine geometry. The main scene and every sub-scene MUST share one
+    `MaterialStore`, which MUST contain `PORTAL_MATERIAL`.
+
+    Note: next-event estimation (`targetGuide`) is not yet supported together
+    with sub-scenes.
+
+    Parameters
+    ----------
+    Same as `SceneForwardTracer`, plus:
+    subScenes: Sequence[Scene]
+        Sub-scenes referenced by the portals; a portal `target` selects
+        `subScenes[target - 1]`.
+    """
+
+    name = "Multi-Scene Forward Tracer"
+
+    def __init__(
+        self,
+        batchSize: int,
+        ray: RayModel,
+        source: LightSource,
+        response: HitResponse,
+        rng: RNG,
+        scene: Scene,
+        subScenes: Sequence[Scene],
+        *,
+        capacity: int | None = None,
+        callback: TraceEventCallback = EmptyEventCallback(),
+        maxPathLength: int = 64,
+        targetId: int | None = None,
+        sampleCoefficient: float = float("NaN"),
+        maxTime: float = float("inf"),
+        targetGuide: TargetGuide | None = None,
+        disableDirectLighting: bool = False,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
+    ) -> None:
+        super().__init__(
+            batchSize,
+            ray,
+            source,
+            response,
+            rng,
+            scene,
+            capacity=capacity,
+            callback=callback,
+            lamSource=None,  # provided by light source
+            maxPathLength=maxPathLength,
+            targetId=targetId,
+            sampleCoefficient=sampleCoefficient,
+            maxTime=maxTime,
+            targetGuide=targetGuide,
+            disableDirectLighting=disableDirectLighting,
+            rayOffsetScale=rayOffsetScale,
+            rayOffsetOrigin=rayOffsetOrigin,
+            subScenes=subScenes,
+        )
+        self._lightSource = source
+
+    @property
+    def source(self) -> LightSource:
+        """Source producing rays"""
+        return self._lightSource
+
+    @property
+    def subScenes(self) -> list[Scene]:
+        """Sub-scenes reachable through portals."""
+        return self._subScenes
 
 
 class SceneBackwardTargetTracer(_SceneTargetTracer):
@@ -2360,6 +2730,27 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         Whether to ignore contributions from direct lighting, i.e. paths with
         no scattering. Usefull if a dedicated tracer or estimator for direct
         light contributions is additionally used.
+    rayOffsetScale: float | None, default=None
+        Optional override for the self-intersection offset applied to coordinates
+        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
+        (`256.0`).
+        
+        Upon hitting a surface the ray is offset towards the new volume to avoid
+        self-intersection due to numerical inaccuracies. The default value is
+        known to be a robust safeguard against self-intersection, but it is very
+        conservative. For thin volumes choosing a smaller offset might improve
+        the quality of the simulation.
+        
+        !!! warning
+        
+            Decreasing this value might introduce self-intersection artifacts.
+            This should only be done when necessary and with caution.
+    rayOffsetOrigin: float | None, default=None
+        Optional override for the absolute self-intersection offset applied to 
+        coordinates with (`|coordinate| < 1/32`). `None` keeps the shader default
+        (`1/65536`). 
+        
+        See also `rayOffsetScale`.
     """
 
     name = "Scene Backward Target Tracer"
@@ -2382,6 +2773,8 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         maxTime: float = float("inf"),
         targetGuide: TargetGuide | None = None,
         disableDirectLighting: bool = False,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
     ) -> None:
         super().__init__(
             batchSize,
@@ -2399,6 +2792,8 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
             maxTime=maxTime,
             targetGuide=targetGuide,
             disableDirectLighting=disableDirectLighting,
+            rayOffsetScale=rayOffsetScale,
+            rayOffsetOrigin=rayOffsetOrigin,
         )
         self._camera = camera
         self._photons = wavelengthSource

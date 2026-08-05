@@ -969,9 +969,9 @@ class HistogramWavelengthHitResponse(ValueHitResponse):
         Value response processing hits.
     binCount: int, default=100
         Number of bins in the histogram
-    wavelength0: float, default=400.0 nm
+    wavelength0: float, default=0.0 nm
         Left-most edge of the histogram.
-    binSize: float, default=1.m
+    binSize: float, default=1 nm
         Width of each bin.
     normalization: float | None, default=None
         Common normalization factor each bin gets multiplied with. If `None`,
@@ -1011,7 +1011,7 @@ class HistogramWavelengthHitResponse(ValueHitResponse):
         response: ValueResponse,
         *,
         binCount: int = 100,
-        wavelength0: float = 400.0 * u.nm,
+        wavelength0: float = 0.0,
         binSize: float = 1.0 * u.nm,
         normalization: float | None = None,
         bufferCount: int = 128,

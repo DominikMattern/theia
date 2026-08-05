@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from theia.material import MaterialStore, VACUUM_IDX
+from theia.material import Material, MaterialStore, VACUUM_IDX
+from theia.surface import BorderSurface
 import theia.units as u
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from numpy.typing import NDArray, ArrayLike
 from typing import Final
 
@@ -24,6 +25,8 @@ __all__ = [
     "loadMesh",
     "MeshInstance",
     "MeshStore",
+    "PORTAL_MATERIAL",
+    "PORTAL_MATERIAL_NAME",
     "RectBBox",
     "Scene",
     "SceneTemplate",
@@ -34,6 +37,20 @@ __all__ = [
 
 def __dir__():
     return __all__
+
+
+#: Name of the built-in portal material assigned to portal boxes by
+#: ``MeshStore.createPortal``. Include ``PORTAL_MATERIAL`` in the MaterialStore.
+PORTAL_MATERIAL_NAME: Final[str] = "__portal__"
+
+#: Built-in, generic portal material used by ``MeshStore.createPortal``. It is
+#: medium-neutral and skips the media-mismatch test (flags "P*"), so its media
+#: are irrelevant and one shared instance serves all portals. Only the
+#: ``MultiSceneForwardTracer`` acts on the PORTAL flag; other tracers ignore it
+#: (the BorderSurface model is never invoked for a portal hit).
+PORTAL_MATERIAL: Final[Material] = Material(
+    PORTAL_MATERIAL_NAME, None, None, BorderSurface(), flags="P*"
+)
 
 
 class Transform:
@@ -471,6 +488,37 @@ class MeshInstance:
         self._bbox = self.localBBox.transform(self.transform)
         self.material = material
         self._objectId = objectId
+        #: Mesh key of a portal box (set by MeshStore.createPortal), else None.
+        #: Used to check that linked portal boxes are the same mesh.
+        self.portalMeshKey: str | None = None
+        #: Portal transition links (see setPortalLinks), or None for a non-portal.
+        #: A list indexed by the CURRENT context id (instanceId); each entry is a
+        #: ``(arrivalInstance, nextInstanceId)`` tuple. See MultiSceneForwardTracer.
+        self.portalLinks: list[tuple["MeshInstance", int]] | None = None
+
+    def setPortalLinks(
+        self,
+        links: "tuple[MeshInstance, int] | Sequence[tuple[MeshInstance, int]]",
+    ) -> None:
+        """
+        Define where a photon crossing this portal box continues (see
+        MultiSceneForwardTracer). ``links`` is indexed by the CURRENT context id
+        (``instanceId``) the photon carries; entry ``i`` is a tuple
+        ``(arrivalInstance, nextInstanceId)`` meaning: a photon crossing this box
+        while carrying context ``i`` is placed at ``arrivalInstance`` (whose scene
+        and transform define the target frame) carrying context ``nextInstanceId``.
+
+        A single ``(arrivalInstance, nextInstanceId)`` tuple is accepted as
+        shorthand for a one-context box (e.g. a main-scene portal), equivalent to
+        passing ``[link]``.
+        """
+        if (
+            isinstance(links, tuple)
+            and len(links) == 2
+            and isinstance(links[0], MeshInstance)
+        ):
+            links = [links]  # scalar shorthand
+        self.portalLinks = [(inst, int(nextId)) for inst, nextId in links]
 
     @property
     def bbox(self) -> RectBBox:
@@ -612,6 +660,45 @@ class MeshStore:
             instance.transform = trafo.numpy()
         return instance
 
+    def createPortal(
+        self,
+        key: str,
+        transform: Transform | None = None,
+        *,
+        material: str = PORTAL_MATERIAL_NAME,
+        scale: float | None = None,
+    ) -> MeshInstance:
+        """
+        Creates a portal box instance of a mesh. Placing the box is separate from
+        linking it: after creating all portal boxes, call
+        `MeshInstance.setPortalLinks` to define where a crossing continues. The
+        surface model runs normally and a TRANSMITTED/crossed ray switches to the
+        arrival box's scene/frame (reflected rays stay); see `MultiSceneForwardTracer`.
+
+        By default the built-in `PORTAL_MATERIAL` (a medium-neutral `BorderSurface`)
+        is assigned. Pass `material` to couple the portal to a real surface instead
+        (any `Material` whose flags carry `MaterialFlags.PORTAL` on both sides, e.g.
+        a `DielectricSurface` with flags `"PRT"` = PORTAL + reflect + transmit). The
+        chosen material must be present in the Scene's `MaterialStore`.
+
+        Parameters
+        ----------
+        key: str
+            Name of the (bounding-box) mesh as given to the MeshStore.
+        transform: Transform | None, default=None
+            Placement of the box in its scene. May include scale (uniform or
+            non-uniform) to size a unit mesh to the true physical box/ellipsoid;
+            linked boxes must have matching scale (see MultiSceneForwardTracer).
+        material: str, default=PORTAL_MATERIAL_NAME
+            Name of the portal material to assign; must carry the PORTAL flag.
+        scale: float | None, default=None
+            Vertex unit shorthand, forwarded to `createInstance` (defaults to 1 m);
+            folds into the instance transform just like `transform`.
+        """
+        instance = self.createInstance(key, material, transform, scale=scale)
+        instance.portalMeshKey = key
+        return instance
+
 
 class Scene:
     """
@@ -641,6 +728,7 @@ class Scene:
         instances = list(instances)
         if len(instances) == 0:
             raise ValueError("No instances given. Scene cannot be empty!")
+        self._instances = instances
         self._materials = materials
         if bbox is None:
             bbox = RectBBox((-1.0, -1.0, -1.0) * u.km, (1.0, 1.0, 1.0) * u.km)
@@ -679,6 +767,11 @@ class Scene:
     @bbox.setter
     def bbox(self, value: RectBBox) -> None:
         self._bbox = value
+
+    @property
+    def instances(self) -> list[MeshInstance]:
+        """Mesh instances making up the scene, in gl_InstanceID order."""
+        return self._instances
 
     @property
     def materials(self) -> MaterialStore:

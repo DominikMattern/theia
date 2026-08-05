@@ -38,6 +38,13 @@ struct ForwardRay {
     float lin_contrib;
     float log_contrib;
     #endif
+
+    #ifdef RAY_PORTAL
+    //(sceneId, portalId): sceneId 0 = main scene; portalId identifies the portal
+    //instance used to enter a sub-scene (needed for the exit transform). Only
+    //present for the MultiSceneForwardTracer (defines RAY_PORTAL).
+    ivec2 frame;
+    #endif
 };
 //tell other code this ray exist
 #define ForwardRay ForwardRay
@@ -97,6 +104,9 @@ ForwardRay createForwardRay(
         #endif
         contrib,
         0.0
+        #ifdef RAY_PORTAL
+        ,ivec2(0, 0)   //start in the main scene, no portal
+        #endif
     );
 }
 
@@ -120,6 +130,9 @@ ForwardRay createForwardRay(
         #ifndef RAY_PARTICLE
         ,1.0
         ,0.0
+        #endif
+        #ifdef RAY_PORTAL
+        ,ivec2(0, 0)   //start in the main scene, no portal
         #endif
     );
 }
@@ -422,6 +435,9 @@ ForwardRay loadForwardRay(uvec2 queueAdr, uint queueSize, uint idx) {
         #ifndef RAY_PARTICLE
         ,contrib
         ,0.0
+        #endif
+        #ifdef RAY_PORTAL
+        ,ivec2(0, 0)   //queue path does not carry the frame (megakernel tracer only)
         #endif
     );
 }

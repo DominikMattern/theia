@@ -20,7 +20,7 @@ MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
     MicrofacetParams params;
     params.alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
     params.tangent1 = perpendicularTo(hit.rayNrm);
-    params.tangent2 = perpendicularTo(hit.rayNrm, params.tangent1);
+    params.tangent2 = crosser(hit.rayNrm, params.tangent1);
     return params;
 }
 
@@ -32,7 +32,7 @@ vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const 
     float tan2_theta = params.alpha * params.alpha * rdm.x / (1 - rdm.x);
     float phi = TWO_PI * rdm.y;
 
-    float cos_theta = sqrt(1.0 / (1.0 + tan2_theta));
+    float cos_theta = inversesqrt(1.0 + tan2_theta);
     float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
 
     //rotate surface normal

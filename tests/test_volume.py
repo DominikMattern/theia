@@ -345,14 +345,14 @@ def test_Fluorescent(
         exp_contrib = np.ones_like(contrib)
         mu_f_r = model.fluorescence_coef(result["wavelengthIn"])
         mu_e = mu_f_r + mu_a + mu_s
+        mu_f_r *= qe
         if not absorb:
             exp_contrib[~hitMask] *= ((mu_s + mu_f_r) / mu_e)[~hitMask]
         if not sampleIntLength:
 
             exp_contrib *= np.exp(-mu_e * d)
             exp_contrib[~hitMask] *= mu_e[~hitMask]
-        # TODO: check large error. Likely due to mu_f sampling + interpolation error
-        assert np.allclose(contrib[~absorbed], exp_contrib[~absorbed], atol=0.05)
+        assert np.allclose(contrib[~absorbed], exp_contrib[~absorbed], atol=5e-4)
     # TODO: maybe add a test checking the scattering angles?
 
 
@@ -410,17 +410,76 @@ def test_Fluorescent_scattering(upshift: bool):
     ct_rand = np.multiply(result["directionIn"], result["randomDir"]).sum(-1)
     assert np.allclose(result["directionOut"], result["randomDir"])
     assert np.allclose(result["probSampled"], result["probEval"])
-    mu_f_r = model.fluorescence_coef(result["wavelengthIn"])
+    mu_f_r = model.fluorescence_coef(result["wavelengthIn"]) * qe
     p_scatter = mu_s / (mu_s + mu_f_r) * np.exp(model.log_phase_function(ct_sampled))
     prob_sampled = p_scatter + mu_f_r / (mu_s + mu_f_r) / (4.0 * np.pi)
-    # TODO: check why the large error
-    assert np.allclose(result["probEval"], prob_sampled, atol=0.06)
+    assert np.allclose(result["probEval"], prob_sampled, atol=2e-3)
     p_scatter_r = mu_s / (mu_s + mu_f_r) * np.exp(model.log_phase_function(ct_rand))
     prob_rand = p_scatter_r + mu_f_r / (mu_s + mu_f_r) / (4.0 * np.pi)
-    assert np.allclose(result["probRandom"], prob_rand, atol=0.06)
+    assert np.allclose(result["probRandom"], prob_rand, atol=5e-4)
     contrib = result["contribOut"] / result["contribIn"]
     contrib_exp = np.ones_like(contrib)
     contrib_exp *= mu_s + mu_f_r
     contrib_exp[f_mask] *= 1.0 / (4.0 * np.pi)
     contrib_exp[~f_mask] *= np.exp(model.log_phase_function(ct_rand[~f_mask]))
-    assert np.allclose(contrib, contrib_exp, atol=5e-3)
+    assert np.allclose(contrib, contrib_exp, atol=5e-5)
+
+
+def test_Fluorescent_exponentialDecay():
+    # with timeModel="exponential" the fluorescence re-emission delay is drawn
+    # from an exponential decay with time constant fluorescence_time
+    N = 256 * 1024  # enough fluorescent scatters for the histogram
+    lam_range = (150.0, 600.0) * u.nm
+    mu_a = 0.02 / u.m
+    mu_s = 0.06 / u.m
+    mu_f = 1.0 / u.m  # and nm^-1
+    g = 0.7
+    qe = 0.8
+    delta_t = 25.0 * u.ns
+
+    # create medium
+    volModel = theia.volume.Fluorescent(timeModel="exponential")
+    model = FluorescentTestMediumModel(mu_a, mu_s, mu_f, g, qe, delta_t)
+    medium = model.createMedium(physicModel=volModel)
+    matStore = MaterialStore([], media=[medium])
+    medIdx = matStore.media["fluorescent"]
+
+    # create pipeline
+    ray = UnpolarizedRay()
+    rng = PhiloxRNG(key=0xABBA)
+    photons = UniformWavelengthSource(lambdaRange=lam_range)
+    source = SphericalLightSource(photons, mediumIdx=medIdx)
+    sampler = VolumeInteractionSampler(
+        N,
+        ray,
+        volModel,
+        matStore,
+        rng,
+        source,
+        sampleCoef=0.05 / u.m,
+        propagateRay=True,
+    )
+    # run pipeline
+    pl.runPipeline(sampler.collectStages())
+
+    # check results
+    result = sampler.queue.view(0)
+    fluorMask = result["wavelengthIn"] != result["wavelengthOut"]
+    assert fluorMask.sum() > 0
+    dt = result["timeOut"] - result["timeIn"]
+    d = np.sqrt(np.square(result["positionIn"] - result["positionOut"]).sum(-1))
+    vg = model.group_velocity(500.0)  # constant
+    dt = (dt - d / vg)[fluorMask]
+
+    # an exponential distribution has mean and standard deviation equal to its
+    # time constant
+    n = len(dt)
+    assert dt.min() > -1e-5
+    assert abs(np.mean(dt) - delta_t) < 3.0 * delta_t / np.sqrt(n)
+    assert abs(np.std(dt) - delta_t) < 3.0 * delta_t / np.sqrt(n)
+    # check distribution via histogram
+    hist, edges = np.histogram(dt, bins=40, range=(0.0, 6.0 * delta_t))
+    hist = hist / n
+    exp_hist = np.diff(1.0 - np.exp(-edges / delta_t))
+    sigma = np.sqrt(exp_hist * (1.0 - exp_hist) / n)
+    assert np.all(np.abs(hist - exp_hist) < 3.0 * sigma + 1e-5)

@@ -9,7 +9,7 @@ import hephaistos as hp
 from hephaistos.pipeline import PipelineStage, SourceCodeMixin
 from hephaistos.queue import IOQueue
 
-from ctypes import Structure, c_float, c_int64, c_uint32
+from ctypes import Structure, c_float, c_uint32, c_uint64
 from hephaistos.glsl import buffer_reference, vec2, vec3
 from theia.util import createCType
 
@@ -286,15 +286,24 @@ class SpectrumWavelengthSource(WavelengthSource):
     spectrumTableAddress: int
         GPU address of a table containing the percent point function of the
         light spectrum.
-    """
 
-    class WavelengthParams(Structure):
-        _fields_ = [("spectrumTableAddress", c_int64)]
+    Stage Parameters
+    ----------------
+    spectrumTableAddress: int
+        GPU address of a table containing the percent point function of the
+        light spectrum.
+    """
 
     name = "Spectrum Wavelength Source"
 
+    class WavelengthParams(Structure):
+        _fields_ = [("spectrumTableAddress", c_uint64)]
+
     def __init__(self, spectrumTableAddress: int) -> None:
-        super().__init__(params={"WavelengthParams": SpectrumWavelengthSource.WavelengthParams}, nRNGSamples=1)
+        super().__init__(
+            nRNGSamples=1,
+            params={"WavelengthParams": self.WavelengthParams},
+        )
         self.setParams(spectrumTableAddress=spectrumTableAddress)
 
     @property
@@ -394,7 +403,7 @@ class FunctionWavelengthSource(WavelengthSource):
     name = "Function Wavelength Source"
 
     class WavelengthParams(Structure):
-        _fields_ = [("_table", c_int64), ("_contrib", c_float)]
+        _fields_ = [("_table", c_uint64), ("_contrib", c_float)]
 
     def __init__(
         self,
@@ -488,14 +497,6 @@ class LightSource(PipelineStage):
     def wavelengthSource(self) -> WavelengthSource | None:
         """Optional wavelength source used for sampling wavelengths"""
         return self._wavelengthSource
-
-    @property
-    def batchSize(self) -> int | None:
-        """
-        Used to update the batch size of the tracer. If `None`, the
-        batch size will stay the same.
-        """
-        return None
 
     def run(self, i: int) -> list[hp.Command]:
         # most light sources will not issue any commands
@@ -623,12 +624,6 @@ class LightSampler(PipelineStage):
             stages.append(self.source.wavelengthSource)
         stages.extend([self.source, self])
         return stages
-
-    def _finishParams(self, i: int) -> None:
-        batchSize = self.source.batchSize
-        if batchSize is not None:
-            self.setParam("_batchSize", batchSize)
-        super()._finishParams(i)
 
     def run(self, i: int) -> list[hp.Command]:
         for stage in self.collectStages():

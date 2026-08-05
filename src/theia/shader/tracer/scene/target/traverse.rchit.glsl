@@ -24,6 +24,11 @@ readonly buffer ObjectIdMap{ int objectIdMap[]; };
 layout(location = 0) rayPayloadInEXT TraceData traceData;
 hitAttributeEXT vec2 barys; //filled by default intersection shader
 
+#ifdef RAY_PORTAL
+#define PORTAL_HIT_STAGE   //enable the SurfaceHit/gl_InstanceID-dependent helpers
+#include "tracer/scene/portal/portal.glsl"
+#endif
+
 //the surface model may not support (non specular) scattering. In that case all
 //MIS contributions are trivially zero and we can skip them alltogether
 #if !defined(SURFACE_MODEL_SPECULAR) && !defined(DISABLE_NEE)
@@ -175,7 +180,11 @@ void main() {
     //did we hit a target?
     bool isTarget = (hit.flags & MATERIAL_TARGET_BIT) != 0;
     //do we have a filter on the objectId? (0x80000000 marks no filter)
+    #ifdef RAY_PORTAL
+    int objectId = portalObjectId(traceData.ray.frame);   //right table per frame
+    #else
     int objectId = objectIdMap[gl_InstanceID];
+    #endif
     bool filtered = params.targetId != 0x80000000 && params.targetId != objectId;
     if (isTarget && !filtered) {
         HitItem item;

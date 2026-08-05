@@ -42,7 +42,7 @@ MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
     params.sigma = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
     params.c = 1.0 - exp(-(PI_OVER_TWO * PI_OVER_TWO) / (2.0 * params.sigma * params.sigma));
     params.tangent1 = perpendicularTo(hit.rayNrm);
-    params.tangent2 = perpendicularTo(hit.rayNrm, params.tangent1);
+    params.tangent2 = crosser(hit.rayNrm, params.tangent1);
     return params;
 }
 

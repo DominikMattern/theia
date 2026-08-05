@@ -22,6 +22,7 @@ from typing_extensions import Self  # introduced in 3.11
 __all__ = [
     "FloatProperty",
     "IntProperty",
+    "MediumIndexProperty",
     "TableProperty",
     "Property",
     "PropertyTable",
@@ -199,6 +200,52 @@ class TableProperty(Property, ext="table"):
     @classmethod
     def load(cls, file) -> Self:
         return cls(Table.load(file))
+
+
+class MediumIndexProperty(Property, ext="medidx"):
+    """
+    Property referencing a medium by name. The reference is resolved to the
+    medium's index in the media table during baking (see
+    `theia.material._createTableEntryFromMaterial`), i.e. once the media table
+    (and thus the index) actually exists. This solves the chicken-and-egg problem
+    that the index is unknown at the time the material is created.
+
+    The resolved index is stored as a raw 32 bit unsigned integer in the high
+    word (`.y`) of the slot, matching the shader access
+    `loadMaterialSlot_uvec2(SLOT, materialIdx).y`.
+    """
+
+    # special media index denoting vacuum; mirrors theia.material.VACUUM_IDX
+    # (kept as a literal here to avoid a circular import)
+    _VACUUM_IDX = 0xFFFFFFFF
+
+    def __init__(self, medium: str | None = None) -> None:
+        super().__init__()
+        self.medium = medium
+        """Name of the referenced medium (`None` for vacuum)"""
+
+    def resolve(self, mediaTable: PropertyTable) -> IntProperty:
+        """Resolves the medium name to an `IntProperty` holding its index in `.y`"""
+        if self.medium is None:
+            idx = self._VACUUM_IDX
+        elif self.medium not in mediaTable:
+            raise ValueError(
+                f'MediumIndexProperty references unknown medium "{self.medium}"'
+            )
+        else:
+            idx = mediaTable[self.medium]
+        prop = IntProperty()
+        # store the (unsigned) index in the high word, low word unused
+        prop.data = unpack("<Q", pack("<II", 0, idx))[0]
+        return prop
+
+    def save(self, file) -> None:
+        file.write((self.medium or "").encode("utf-8"))
+
+    @classmethod
+    def load(cls, file) -> "MediumIndexProperty":
+        data = file.read().decode("utf-8")
+        return cls(data if data else None)
 
 
 PropertyTableEntry = Mapping[str, Property]

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from theia.compiler import createPreamble, loadShader
-from theia.volume import VolumeModel
+from theia.volume import Fluorescent, VolumeModel
 
 from importlib.resources.abc import Traversable
 from typing import ClassVar, Type
@@ -21,6 +21,7 @@ __all__ = [
     "MetalSurface",
     "SurfaceModel",
     "SurfaceRNGDraws",
+    "ThinSlabSurface",
 ]
 
 
