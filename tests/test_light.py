@@ -482,7 +482,7 @@ def test_ScintillationDepositionEventSource_fwd(particle: bool):
         photonYield=photonYield,
         timeConstant=0.0,  # no scintillation delay -> time follows only from the transit
         emitParticles=particle,
-        numPhotons=numPhotons,
+        numSamples=numPhotons if particle else None,
     )
     sampler = theia.light.LightSampler(N, light, ray, rng=philox)
     # run
@@ -642,7 +642,7 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
     lam = 500.0 * u.nm
 
     photonsPerEvent = energyDeposition * photonYield
-    # in particle mode the sampler emits exactly sum(numPhotons) particles
+    # in particle mode the sampler emits exactly sum(numSamples) particles
     number = np.round(photonsPerEvent).astype(int)
     cumulative = np.cumsum(number)
     M = int(cumulative[-1])
@@ -666,7 +666,7 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
         photonYield=photonYield,
         timeConstant=0.0,
         emitParticles=particle,
-        numPhotons=number,
+        numSamples=number if particle else None,
     )
     sampler = theia.light.LightSampler(N, light, ray, rng=philox)
     # run

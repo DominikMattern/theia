@@ -9,7 +9,7 @@ import hephaistos as hp
 from hephaistos.pipeline import PipelineStage, SourceCodeMixin
 from hephaistos.queue import IOQueue
 
-from ctypes import Structure, c_float, c_uint32, c_uint64
+from ctypes import Structure, addressof, c_float, c_uint32, c_uint64, memmove, sizeof
 from hephaistos.glsl import buffer_reference, vec2, vec3
 from theia.util import createCType
 
@@ -22,10 +22,11 @@ import theia.units as u
 
 from warnings import warn
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from numpy.typing import ArrayLike, NDArray
 
 __all__ = [
+    "BatchedSpectrumWavelengthSource",
     "CherenkovLightSource",
     "ConeLightSource",
     "ConstWavelengthSource",
@@ -49,6 +50,48 @@ __all__ = [
 
 def __dir__():
     return __all__
+
+
+def _make_scalar_array(ctype, dtype, n):
+    """
+    Creates a ctypes class mirroring a GLSL array of `n` scalars.
+
+    A single array field rather than n named ones: ctypes assembles the layout of
+    a structure field by field and does so in quadratic time, which for the batch
+    sizes used by scintillation sources dominates the whole setup (n = 262144
+    took minutes). One array field has the exact same memory layout - n tightly
+    packed scalars, which is what the shader expects with `layout(scalar)` - and
+    is built in constant time.
+    """
+
+    class ScalarArray(Structure):
+        _fields_ = [("items", ctype * n)]
+        _dim_ = n
+
+        # `PipelineStage` reads and writes parameters through `value` only. The
+        # setter writes the whole array with a single memmove; assigning element
+        # by element is far too slow for typical batch sizes.
+        @property
+        def value(self):
+            return self.items[:]
+
+        @value.setter
+        def value(self, value):
+            arr = np.ascontiguousarray(value, dtype=dtype)
+            if arr.size != n:
+                raise ValueError(f"expected {n} values, got {arr.size}")
+            memmove(addressof(self), arr.ctypes.data, sizeof(self))
+
+        def __len__(self):
+            return n
+
+        def __getitem__(self, idx):
+            return self.items[idx]
+
+        def __setitem__(self, idx, value):
+            self.items[idx] = value
+
+    return ScalarArray
 
 
 class WavelengthSource(SourceCodeMixin):
@@ -309,6 +352,97 @@ class SpectrumWavelengthSource(WavelengthSource):
     @property
     def sourceCode(self) -> str:
         return loadShader("wavelengthsource/spectrum.glsl")
+
+
+class BatchedSpectrumWavelengthSource(WavelengthSource):
+    """
+    Samples wavelengths from a per batch element spectrum.
+
+    Parameters
+    ----------
+    spectraPerBatch: int
+        Number of batch elements a dispatch is partitioned into. Must match the
+        light source's.
+    spectrumTableAddress: int | Iterable[int], default=0
+        GPU address of the percent point function of each element's spectrum. A
+        single address is broadcast to every element; an array must have length
+        `spectraPerBatch`.
+    count: int | Iterable[int], default=0
+        Number of paths each element owns, broadcast like
+        `spectrumTableAddress`.
+
+    Stage Parameters
+    ----------------
+    spectrumTableAddress: int | Iterable[int]
+        GPU address of the percent point function of each element's spectrum.
+    count: int | Iterable[int]
+        Number of paths each element owns.
+    """
+
+    name = "Batched Spectrum Wavelength Source"
+
+    def __init__(
+        self,
+        spectraPerBatch: int,
+        *,
+        spectrumTableAddress: int | Iterable[int] = 0,
+        count: int | Iterable[int] = 0,
+    ) -> None:
+        if spectraPerBatch < 1:
+            raise ValueError(
+                f"spectraPerBatch must be at least one, got {spectraPerBatch}")
+
+        class WavelengthParams(Structure):
+            _fields_ = [
+                ("spectrumTableAddress",
+                 _make_scalar_array(c_uint64, np.uint64, spectraPerBatch)),
+                ("cumulativeCount",
+                 _make_scalar_array(c_uint32, np.uint32, spectraPerBatch)),
+            ]
+
+        super().__init__(
+            nRNGSamples=1,
+            params={"WavelengthParams": WavelengthParams},
+            extra={"count"},
+        )
+        self._spectraPerBatch = spectraPerBatch
+
+        def norm(value, name, dtype):
+            """Broadcast a scalar over the batch, or check an array's length."""
+            array = np.asarray(value, dtype)
+            if array.ndim == 0:
+                return np.full(spectraPerBatch, array, dtype)
+            if array.size != spectraPerBatch:
+                raise ValueError(f"'{name}' must have length {spectraPerBatch}, "
+                                 f"got {array.size}")
+            return array
+
+        self.setParams(
+            spectrumTableAddress=norm(spectrumTableAddress,
+                                      "spectrumTableAddress", np.uint64),
+            count=norm(count, "count", np.uint32),
+        )
+
+    @property
+    def spectraPerBatch(self) -> int:
+        """Number of batch elements a dispatch is partitioned into"""
+        return self._spectraPerBatch
+
+    @property
+    def sourceCode(self) -> str:
+        preamble = createPreamble(WAVELENGTH_SOURCE_SPECTRA_PER_BATCH=self._spectraPerBatch)
+        return preamble + loadShader("wavelengthsource/spectrum_batched.glsl")
+
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        # accumulate in 64 bit: the running sum may exceed what a single element
+        # can hold long before the total exceeds the uint32 the shader reads
+        c = np.cumsum(np.asarray(self.getParam("count"), np.uint64))
+        if len(c) and c[-1] > np.iinfo(np.uint32).max:
+            raise ValueError(
+                f"{c[-1]} paths exceed the {np.iinfo(np.uint32).max} the shader "
+                "can index; use a smaller batch")
+        self.setParam("cumulativeCount", c)
 
 
 class UniformWavelengthSource(WavelengthSource):

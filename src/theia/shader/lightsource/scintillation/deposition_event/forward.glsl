@@ -17,34 +17,18 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
 
     //select batch element
 
-    #ifdef LIGHT_SOURCE_EMIT_PARTICLE
-    //for light particles, the event is chosen based on the thread idx to ensure
-    //that each event gets the correct number of photons
+    #if defined(LIGHT_SOURCE_EMIT_PARTICLE) || defined(LIGHT_SOURCE_DETERMINISTIC_RAYS)
+    
+    int batchIdx = findBatchElement(idx);
 
-    //binary search
-    int lo = 0;
-    int hi = BATCH_SIZE - 1;
-
-    while (lo < hi)
-    {
-        int mid = (lo + hi) >> 1;
-
-        if (idx < int(lightParams.cumulativePhotonNumber[mid]))
-            hi = mid;
-        else
-            lo = mid + 1;
-    }
-
-    int batchIdx = lo;
-
-    #elif BATCH_SIZE > 1
+    #elif EVENTS_PER_BATCH > 1
 
     //importance sample a batch element
-    int x = int(floor(random(idx, dim) * float(lightParams.cumulativePhotonNumber[BATCH_SIZE-1])));
+    int x = int(floor(random(idx, dim) * float(lightParams.cumulativePhotonNumber[EVENTS_PER_BATCH-1])));
 
     //binary search
     int lo = 0;
-    int hi = BATCH_SIZE - 1;
+    int hi = EVENTS_PER_BATCH - 1;
 
     while (lo < hi)
     {
@@ -76,18 +60,22 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
 
     //sample scintillation time delay from exponential decay
     float v = random(idx, dim);
-    float total_time = time - log(1.0 - v) * lightParams.timeConstant;
-    
+    float total_time = time - log(1.0 - v) * lightParams.timeConstant[batchIdx];
+
     //calculate contribution
     #ifndef LIGHT_SOURCE_EMIT_PARTICLE
+    #ifdef LIGHT_SOURCE_DETERMINISTIC_RAYS
+    contrib *= lightParams.photonsPerRay[batchIdx]
+             * float(lightParams.cumulativeCount[EVENTS_PER_BATCH-1]);
+    #else
+    contrib *= lightParams.cumulativePhotonNumber[EVENTS_PER_BATCH-1];
+    #endif
     #ifdef SCINTILLATION_USE_ENERGY
     // To get from photon count to energy in eV, multiply by
     //    h * c             h * c
     // ------------  with  -------- = 1.239841984e-6
     //  e * lambda            e
-    contrib *= lightParams.cumulativePhotonNumber[BATCH_SIZE-1] * 1.239841983e-6 / wavelength;
-    #else
-    contrib *= lightParams.cumulativePhotonNumber[BATCH_SIZE-1];
+    contrib *= 1.239841983e-6 / wavelength;
     #endif
     #endif
 
@@ -96,7 +84,7 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
         position,
         direction,
         wavelength,
-        lightParams.mediumIdx,
+        lightParams.mediumIdx[batchIdx],
         total_time
         #ifndef LIGHT_SOURCE_EMIT_PARTICLE
         , contrib
