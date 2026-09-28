@@ -18,6 +18,7 @@ ResultCode crossBorder(
     inout ForwardRay ray,   ///< Ray to cross
     const SurfaceHit hit    ///< Description of surface hit
 ) {
+<<<<<<< HEAD
 #ifdef RAY_PORTAL
     //portal surface: no world-space offset (portalReframe sets position from the
     //precise object-space hit); just swap the medium, then switch scene/frame.
@@ -28,6 +29,9 @@ ResultCode crossBorder(
     }
 #endif
     ray.position = offsetRay(hit.worldPos, -hit.rayNrm);
+=======
+    ray.position = offsetRay(hit.worldPos, hit.rayNrm, -hit.rayOffset);
+>>>>>>> 0276a8499cf82168b3ecf2bf9e6128362d1d617d
     return updateMedium(ray, hit.otherMediumIdx);
 }
 
@@ -40,7 +44,7 @@ ResultCode reflectRay(
     vec3 newDir             ///< Direction in which to reflect
 ) {
     //offset ray to prevent self-intersection in next tracing step
-    ray.position = offsetRay(hit.worldPos, hit.rayNrm);
+    ray.position = offsetRay(hit.worldPos, hit.rayNrm, hit.rayOffset);
     return reflectRay(ray, newDir, hit.otherMediumIdx);
 }
 /**
@@ -51,7 +55,7 @@ ResultCode reflectRay(
     const SurfaceHit hit    ///< Description of surface hit
 ) {
     //offset ray to prevent self-intersection in next tracing step
-    ray.position = offsetRay(hit.worldPos, hit.rayNrm);
+    ray.position = offsetRay(hit.worldPos, hit.rayNrm, hit.rayOffset);
     vec3 newDir = reflect(ray.direction, hit.rayNrm);
     return reflectRay(ray, newDir, hit.otherMediumIdx);
 }
@@ -76,7 +80,7 @@ ResultCode transmitRay(
     }
 #endif
     //offset ray to prevent self-intersection in next tracing step
-    ray.position = offsetRay(hit.worldPos, -hit.rayNrm);
+    ray.position = offsetRay(hit.worldPos, hit.rayNrm, -hit.rayOffset);
     return transmitRay(ray, newDir, hit.otherMediumIdx);
 }
 /**
@@ -87,6 +91,11 @@ ResultCode transmitRay(
     const SurfaceHit hit,   ///< Description of surface hit
     float n_i, float n_o    ///< Refractive index of incident and outgoing medium
 ) {
+<<<<<<< HEAD
+=======
+    //offset ray to prevent self-intersection in next tracing step
+    ray.position = offsetRay(hit.worldPos, hit.rayNrm, -hit.rayOffset);
+>>>>>>> 0276a8499cf82168b3ecf2bf9e6128362d1d617d
     vec3 newDir = refract(ray.direction, hit.rayNrm, n_i / n_o);
     //If we try to transmit the ray when we are in the region of total internal
     //reflection, refract() returns a zero vector -> notify

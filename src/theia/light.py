@@ -9,7 +9,7 @@ import hephaistos as hp
 from hephaistos.pipeline import PipelineStage, SourceCodeMixin
 from hephaistos.queue import IOQueue
 
-from ctypes import Structure, addressof, c_float, c_uint32, c_uint64, memmove, sizeof
+from ctypes import Structure, c_float, c_uint32, c_uint64, addressof, memmove, sizeof
 from hephaistos.glsl import buffer_reference, vec2, vec3
 from theia.util import createCType
 

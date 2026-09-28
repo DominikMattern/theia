@@ -15,6 +15,7 @@
 #ifndef RAY_OFFSET_THRESHOLD
 #define RAY_OFFSET_THRESHOLD (1.0 / 32.0)
 #endif
+#include "util/float.glsl"
 
 /**
  * Offsets ray position from surface hits to prevent self-intersection, i.e.
@@ -55,6 +56,14 @@ vec3 offsetRay(vec3 p, vec3 n) {
         abs(p.y) < RAY_OFFSET_THRESHOLD ? p.y + RAY_OFFSET_ORIGIN * n.y : p_i.y,
         abs(p.z) < RAY_OFFSET_THRESHOLD ? p.z + RAY_OFFSET_ORIGIN * n.z : p_i.z
     );
+}
+
+/**
+ * Offsets point along normal by given offset
+*/
+vec3 offsetRay(vec3 p, vec3 n, float o) {
+    precise vec3 r = fmaKHR(vec3(o), n, p);
+    return r;
 }
 
 #endif
