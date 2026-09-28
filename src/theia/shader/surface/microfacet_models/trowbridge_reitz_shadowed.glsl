@@ -16,7 +16,7 @@ is described in [1].
 Micro-facet parameters that are constant across a single surface interaction,
 i.e. do not depend on the sampled facet. They are computed once via
 prepare_microfacet() and then passed into sample_microfacet_normal() and
-check_microfacet() on every retry, so the loop-invariant roughness load, the
+microfacet_accept_prob() on every retry, so the loop-invariant roughness load, the
 local coordinate system and the hemispherical-configuration basis are not
 recomputed per iteration of the rejection loop.
 */
@@ -69,7 +69,7 @@ vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const 
 float masking_function(float cos_n, float alpha){
     //handle very small cosines
     if(cos_n < 1e-3){
-        return 0;
+        return 0.0;
     }
 
     float tan2_n = max(1.0 - cos_n*cos_n, 0.0) / (cos_n*cos_n);
@@ -78,11 +78,38 @@ float masking_function(float cos_n, float alpha){
 }
 
 
-//rejection sample the masking
-bool check_microfacet(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
-    float u = random(idx, dim);
-    float mask = masking_function(abs(dot(dirOut, hit.rayNrm)), params.alpha);
-    return (mask > u);
+#ifdef ROUGH_SURFACE_NEE
+//Deterministic twin of sample_microfacet_normal(): the density with which it
+//draws `microfacetNormal`, measured in solid angle. This is the distribution of
+//visible normals
+//
+//    D_vis(h) = G1(w_i) * max(0, dot(w_i,h)) * D(h) / dot(w_i,n)
+//
+//with D the Trowbridge-Reitz NDF. Already normalized to one, and zero for
+//back-facing facets, so the front-face condition needs no separate factor.
+float eval_microfacet_density(const MicrofacetParams params, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+    float cos_h = dot(microfacetNormal, hit.rayNrm);
+    if (cos_h <= 0.0) return 0.0;
+    //w_i points away from the surface, i.e. against the ray direction
+    float cos_i = -dot(rayDir, microfacetNormal);
+    float cos_n = abs(dot(rayDir, hit.rayNrm));
+    if (cos_i <= 0.0 || cos_n <= 0.0) return 0.0;
+
+    float cos2 = cos_h * cos_h;
+    float tan2 = (1.0 - cos2) / cos2;
+    float a2 = params.alpha * params.alpha;
+    float d = a2 + tan2;
+    float D = a2 / (PI * cos2 * cos2 * d * d);
+
+    return masking_function(cos_n, params.alpha) * cos_i * D / cos_n;
+}
+
+#endif
+
+//Probability that this facet is accepted for the given outgoing direction.
+//The caller turns it into a decision by comparing against a single uniform.
+float microfacet_accept_prob(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+    return masking_function(abs(dot(dirOut, hit.rayNrm)), params.alpha);
 }
 
 #endif

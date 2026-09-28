@@ -1,16 +1,17 @@
 #include "math.glsl"
 #include "util/sample.glsl"
 #include "surface/fresnel.glsl"
-#include "surface/lobes.glsl"
 
 /*
 Shared implementation of all rough metal surface models. The only model-specific
-parts are `sample_microfacet_normal` and `check_microfacet`, which are provided
-by one of the files in `microfacet_models/`.
+parts are `sample_microfacet_normal`,
+`eval_microfacet_density` and `microfacet_accept_prob`, which are provided by one
+of the files in `microfacet_models/`.
 
-Metals never transmit; the non-reflected fraction is absorbed. The reflected
-component is decomposed into a specular spike, specular lobe, diffuse lobe and
-backscattering (see `surface/lobes.glsl`).
+Metals never transmit; the non-reflected fraction is absorbed. The surface is a
+pure specular lobe on micro-facets and supports NEE/MIS. The Geant4 UNIFIED
+model, which splits the reflection into several lobes and walks across the micro
+structure instead of rejecting facets, lives in surface/unified/ instead.
 
 The reflectance is either taken from the optional material property
 `reflectivity` or, if not given, computed from the conductor Fresnel equations
@@ -18,22 +19,87 @@ using the complex refractive index of the metal medium (real part =
 `refractive_index`, imaginary part = `extinction_coefficient` of the other side).
 */
 
-#define SURFACE_MODEL_SPECULAR
+//SURFACE_MODEL_SPECULAR and ROUGH_SURFACE_NEE are resolved in
+//surface/rough_nee_config.glsl, which theia.surface prepends ahead of the
+//micro-facet model so the model can key off them as well.
 
 struct SurfaceProperties {
     float reflectance;
     vec3 dirReflected;
     bool doReflect;
+    //Optical constants of the two sides, cached because the NEE functions need
+    //them several times per surface hit and each lookup is a chain of dependent
+    //memory accesses. They do not depend on the sampled facet. A negative
+    //`reflectivity` means the material has no such table and the conductor
+    //Fresnel equations apply.
+    float n_i;
+    float n_o;
+    float k;
+    float reflectivity;
 };
 
 //tell tracer we want to do some prep work
 #define SurfaceProperties SurfaceProperties
+
+float roughFresnel(float cos_i, const SurfaceProperties props) {
+    //optional wavelength dependent reflectivity overrides the Fresnel equations
+    if (props.reflectivity >= 0.0)
+        return props.reflectivity;
+    return fresnelConductor(cos_i, props.n_i, props.n_o, props.k);
+}
+
+/**
+ * Outgoing direction of the reflection channel at the given facet and the
+ * probability that the facet loop accepts it: the direction has to stay in the
+ * upper macroscopic hemisphere and the model specific check has to pass. Metals
+ * have no second channel, so this is the whole acceptance.
+ */
+float roughChannel(
+    const MicrofacetParams mfParams,
+    vec3 rayDir,
+    const SurfaceHit hit,
+    vec3 microfacetNormal,
+    out vec3 dir
+) {
+    dir = reflect(rayDir, microfacetNormal);
+    return dot(dir, hit.rayNrm) > 0.0
+        ? microfacet_accept_prob(mfParams, dir, microfacetNormal, hit, rayDir)
+        : 0.0;
+}
+
+//Probability that the facet loop accepts this facet. Consumed by
+//surface/microfacet/normalization.glsl, which tabulates exactly this quantity -
+//so the table cannot drift away from the loop. `eta` is unused: the
+//reflect-or-absorb decision does not change the direction.
+float roughFacetAcceptance(
+    const MicrofacetParams mfParams, vec3 rayDir, const SurfaceHit hit,
+    float eta, vec3 microfacetNormal
+) {
+    vec3 dir;
+    return roughChannel(mfParams, rayDir, hit, microfacetNormal, dir);
+}
+
+#ifdef ROUGH_SURFACE_NEE
+//Acceptance rate of the facet loop below, tabulated on the host over the
+//incidence cosine (see theia.microfacet). Independent of the reflectance: the
+//reflect-or-absorb decision does not change the direction and therefore does
+//not enter the acceptance.
+float roughNormalization(
+    const RAY ray, const SurfaceHit hit, const SurfaceProperties props
+) {
+    float mu_i = abs(dot(ray.direction, hit.rayNrm));
+    return lookUpMaterialTable1D(MICROFACET_Z_REFL, hit.materialIdx, mu_i, 0.0);
+}
+#endif
 
 SurfaceProperties prepareSurface(
     const RAY ray,
     const SurfaceHit hit,
     uint idx, inout uint dim
 ) {
+    //metals only reflect
+    bool canReflect = (hit.flags & NO_REFLECT_BIT) == 0;
+
     //fetch refractive indices (incident medium n_i, metal medium n_o + extinction k)
     float n_i = lookUpMediaTable1D(REFRACTIVE_INDEX, ray.mediumIdx, ray.wavelength, 1.0);
     float n_o = lookUpMediaTable1D(REFRACTIVE_INDEX, hit.otherMediumIdx, ray.wavelength, 1.0);
@@ -41,12 +107,6 @@ SurfaceProperties prepareSurface(
     #ifdef MEDIA_SLOT_EXTINCTION_COEFFICIENT
         k = lookUpMediaTable1D(EXTINCTION_COEFFICIENT, hit.otherMediumIdx, ray.wavelength, 0.0);
     #endif
-
-    //metals only reflect
-    bool canReflect = (hit.flags & NO_REFLECT_BIT) == 0;
-
-    //sample which reflection lobe to use (specular spike/lobe, diffuse, backscatter)
-    ReflectionLobes lobes = sampleReflectionLobes(hit, idx, dim);
 
     //fetch optional reflectivity. If not provided, use the conductor Fresnel reflectance.
     bool hasReflectivity = false;
@@ -57,73 +117,50 @@ SurfaceProperties prepareSurface(
         hasReflectivity = (reflectivity >= 0.0);
     #endif
 
-    //pre-sample the diffuse hemisphere direction once (only used by the diffuse lobe)
-    vec3 diffuseDir = vec3(0.0);
-    if (lobes.doDiffuseLobe)
-        diffuseDir = createLocalCOSY(hit.rayNrm) * sampleHemisphereCosine(random2D(idx, dim));
+    SurfaceProperties props;
+    props.reflectance = hasReflectivity ? reflectivity : 0.0;
+    props.dirReflected = vec3(0.0);
+    props.doReflect = false;
+    props.n_i = n_i;
+    props.n_o = n_o;
+    props.k = k;
+    props.reflectivity = hasReflectivity ? reflectivity : -1.0;
 
-    //we only need a micro-facet normal if the specular lobe direction is needed
-    //or if we have to compute the Fresnel reflectance
-    bool needMicrofacet = lobes.doSpecularLobe || !hasReflectivity;
+    //a metal that may not reflect absorbs everything
+    if (!canReflect)
+        return props;
 
-    float r = hasReflectivity ? reflectivity : 0.0;
-    vec3 dirReflected = vec3(0.0);
-    bool doReflect = false;
+    //compute the facet-independent micro-facet parameters once (roughness,
+    //tangent basis, ...) and reuse them across all retries
+    MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
 
-    if (needMicrofacet) {
-        //compute the facet-independent micro-facet parameters once (roughness,
-        //tangent basis, ...) and reuse them across all retries
-        MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
+    //Sample micro-facets until one is accepted; in most cases the first one is.
+    //The extra iteration is the fall-back after 20 failed attempts: an unrotated
+    //facet (the surface normal) whose acceptance is forced.
+    for (int i = 0; i <= 20; i++) {
+        bool last = (i == 20);
+        vec3 microfacetNormal = hit.rayNrm;
+        if (!last)
+            microfacetNormal = sample_microfacet_normal(mfParams, ray.direction, hit, idx, dim);
 
-        //sample micro-facets until a valid one is found (in most cases the first is valid)
-        bool valid = false;
-        for (int i = 0; i < 20; i++) {
-            vec3 microfacetNormal = sample_microfacet_normal(mfParams, ray.direction, hit, idx, dim);
+        //reflectance at this facet
+        float cos_i = abs(dot(ray.direction, microfacetNormal));
+        if (!hasReflectivity)
+            props.reflectance = fresnelConductor(cos_i, n_i, n_o, k);
 
-            //conductor Fresnel reflectance at the micro-facet (unless a reflectivity is given)
-            float cos_i = abs(dot(ray.direction, microfacetNormal));
-            if (!hasReflectivity)
-                r = fresnelConductor(cos_i, n_i, n_o, k);
-
-            doReflect = random(idx, dim) < r;
-
-            bool cond1 = true;
-            bool cond2 = true;
-
-            if (canReflect) {
-                //actual outgoing direction of the sampled reflection lobe
-                dirReflected = lobeReflectedDir(lobes, ray.direction, hit.rayNrm, microfacetNormal, diffuseDir);
-                //check that reflected ray returns to the original medium
-                cond1 = (dot(dirReflected, hit.rayNrm) > 0);
-                //model-dependent validity check
-                vec3 dirReflectedMicrofacet = lobes.doSpecularLobe ?
-                    dirReflected : reflect(ray.direction, microfacetNormal);
-                cond2 = check_microfacet(mfParams, dirReflectedMicrofacet, microfacetNormal, hit, ray.direction, idx, dim);
-            }
-
-            if (cond1 && cond2) {
-                valid = true;
-                break;
-            }
-        }
-
-        //no valid micro-facet after 20 attempts -> fall back to an unrotated facet (the surface normal)
-        if (!valid) {
-            float cos_i2 = abs(dot(ray.direction, hit.rayNrm));
-            if (!hasReflectivity)
-                r = fresnelConductor(cos_i2, n_i, n_o, k);
-            dirReflected = lobeReflectedDir(lobes, ray.direction, hit.rayNrm, hit.rayNrm, diffuseDir);
-            doReflect = random(idx, dim) < r;
-        }
-    }
-    else {
-        //reflectivity given and no micro-facet needed (no specular lobe)
-        doReflect = random(idx, dim) < r;
-        dirReflected = lobeReflectedDir(lobes, ray.direction, hit.rayNrm, hit.rayNrm, diffuseDir);
+        //decide whether this facet is accepted
+        float a = roughChannel(
+            mfParams, ray.direction, hit, microfacetNormal, props.dirReflected);
+        float u = random(idx, dim);
+        if (last ? (a > 0.0) : (u < a))
+            break;
     }
 
-    //return properties
-    return SurfaceProperties(r, dirReflected, doReflect);
+    //Only used by particle rays, which cannot carry a weight. Drawn once for the
+    //accepted facet rather than per attempt - same statistics, fewer draws.
+    props.doReflect = random(idx, dim) < props.reflectance;
+
+    return props;
 }
 
 bool processSurfaceTargetHit(
@@ -203,3 +240,7 @@ ResultCode sampleSurfaceInteraction(
 
     #endif
 }
+
+#ifdef ROUGH_SURFACE_NEE
+#include "surface/rough_nee.glsl"
+#endif

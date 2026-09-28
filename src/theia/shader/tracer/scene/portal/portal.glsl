@@ -12,14 +12,15 @@
  * model. This header provides the two pieces that live outside that path:
  *   - portalSelectTlas(): acceleration-structure selection for the raygen (always
  *     available; outside PORTAL_HIT_STAGE),
- *   - portalObjectId(): per-scene detector objectId for the closest-hit (needs the
- *     bound ObjectIdMap; define PORTAL_HIT_STAGE before including).
+ *   - portalObjectId(): per-scene AND per-context detector objectId for the
+ *     closest-hit (define PORTAL_HIT_STAGE before including).
  *
  * The photon carries frame = ivec2(sceneId, instanceId) (sceneId 0 = main).
  *
- * Table indexing (built host-side, see trace.py): SubTlasTable / SubObjectIdTable
- * are indexed by (sceneId - 1) (main excluded; main uses params.tlas / the bound
- * ObjectIdMap).
+ * Table indexing (built host-side, see scene.py): SubTlasTable is indexed by
+ * (sceneId - 1) (main excluded; main uses params.tlas), while ObjectIdTable is
+ * indexed by sceneId with main INCLUDED at index 0, like PortalIndexTable /
+ * TransitionTable / PortalMetaTable.
  */
 
 #include "util/offset.glsl"
@@ -39,14 +40,23 @@ uvec2 portalSelectTlas(ivec2 frame) {
 
 #ifdef PORTAL_HIT_STAGE
 
-//Device address of each sub-scene's ObjectIdMap tensor, indexed by (sceneId-1).
-readonly buffer SubObjectIdTable { uvec2 subObjectIdAdr[]; };
+//only the hit stage needs the row strides; the raygen does not declare them
+#include "tracer/scene/portal/meta.glsl"
 
-//objectId for the current hit, reading the right per-scene ObjectIdMap.
+//Per scene (indexed by sceneId, main at 0): device address of an int[] holding
+//the detector ids of that scene as a 2D table [context][gl_InstanceID], stored
+//row-major with the context as the SLOW axis. Row stride is sceneMeta[].y, the
+//instance count. Owned by MultiScene, which sees the complete transition graph
+//and hence the context counts.
+//
+//This replaces the flat ObjectIdMap a plain Scene binds; that declaration is
+//compiled out under RAY_PORTAL (see target/traverse.rchit.glsl).
+readonly buffer ObjectIdTable { uvec2 objectIdAdr[]; };
+
+//objectId for the current hit in the photon's current scene AND context.
 int portalObjectId(ivec2 frame) {
-    if (frame.x == 0)
-        return objectIdMap[gl_InstanceID];   //main scene: the bound ObjectIdMap
-    return IntBuffer(subObjectIdAdr[frame.x - 1]).values[gl_InstanceID];
+    int idx = frame.y * sceneMeta[frame.x].y + gl_InstanceID;
+    return IntBuffer(objectIdAdr[frame.x]).values[idx];
 }
 
 #endif //PORTAL_HIT_STAGE

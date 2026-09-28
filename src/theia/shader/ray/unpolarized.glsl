@@ -40,8 +40,8 @@ struct ForwardRay {
     #endif
 
     #ifdef RAY_PORTAL
-    //(sceneId, portalId): sceneId 0 = main scene; portalId identifies the portal
-    //instance used to enter a sub-scene (needed for the exit transform). Only
+    //(sceneId, context): sceneId 0 = main scene; context specifies the
+    //instance of the sub-scene in case that multiple are placed. Only
     //present for the MultiSceneForwardTracer (defines RAY_PORTAL).
     ivec2 frame;
     #endif
@@ -105,7 +105,7 @@ ForwardRay createForwardRay(
         contrib,
         0.0
         #ifdef RAY_PORTAL
-        ,ivec2(0, 0)   //start in the main scene, no portal
+        ,ivec2(0, 0)   //start in the main scene
         #endif
     );
 }
@@ -132,7 +132,7 @@ ForwardRay createForwardRay(
         ,0.0
         #endif
         #ifdef RAY_PORTAL
-        ,ivec2(0, 0)   //start in the main scene, no portal
+        ,ivec2(0, 0)   //start in the main scene
         #endif
     );
 }
@@ -438,6 +438,102 @@ ForwardRay loadForwardRay(uvec2 queueAdr, uint queueSize, uint idx) {
         #endif
         #ifdef RAY_PORTAL
         ,ivec2(0, 0)   //queue path does not carry the frame (megakernel tracer only)
+        #endif
+    );
+}
+
+/**
+ * Serialization of the complete trace state of a ForwardRay, used by the
+ * wavefront tracer to hand paths that survived a wave over to the next one.
+ *
+ * Deliberately not saveForwardRay(): resuming a path needs more than recording
+ * it does. lin_contrib and log_contrib stay separate (folding them into one
+ * float is what saveForwardRay does and can underflow), the frame travels along,
+ * and the loop state - path id, position in the RNG sequence, number of
+ * iterations already done - is stored as well.
+ *
+ * MUST stay in sync with `UnpolarizedRay.waveItem()` in ray.py, which describes
+ * the same layout for the host side (see the field table there).
+ */
+void saveWaveRay(
+    uvec2 queueAdr, uint queueSize, uint slot,
+    const ForwardRay ray, uint rayIdx, uint dim, uint pathLength
+) {
+    FloatBuffer floats = FloatBuffer(queueAdr);
+    UIntBuffer uints = UIntBuffer(queueAdr);
+    IntBuffer ints = IntBuffer(queueAdr);
+    uint idx = slot; //the save macros consume and advance this
+
+    _saveVec3(ray.position);
+    _saveVec3(ray.direction);
+    _saveFloat(ray.wavelength);
+    _saveUInt(ray.mediumIdx);
+
+    #ifdef RAY_TRANSIENT
+    _saveFloat(ray.time);
+    #endif
+
+    #ifndef RAY_PARTICLE
+    _saveFloat(ray.lin_contrib);
+    _saveFloat(ray.log_contrib);
+    #endif
+
+    #ifdef RAY_PORTAL
+    _saveInt(ray.frame.x);
+    _saveInt(ray.frame.y);
+    #endif
+
+    _saveUInt(rayIdx);
+    _saveUInt(dim);
+    _saveUInt(pathLength);
+}
+
+ForwardRay loadWaveRay(
+    uvec2 queueAdr, uint queueSize, uint slot,
+    out uint rayIdx, out uint dim, out uint pathLength
+) {
+    FloatBuffer floats = FloatBuffer(queueAdr);
+    UIntBuffer uints = UIntBuffer(queueAdr);
+    IntBuffer ints = IntBuffer(queueAdr);
+    uint idx = slot; //the load macros consume and advance this
+
+    vec3 position = _loadVec3;
+    vec3 direction = _loadVec3;
+    float wavelength = _loadFloat;
+    uint mediumIdx = _loadUInt;
+
+    #ifdef RAY_TRANSIENT
+    float time = _loadFloat;
+    #endif
+
+    #ifndef RAY_PARTICLE
+    float lin_contrib = _loadFloat;
+    float log_contrib = _loadFloat;
+    #endif
+
+    #ifdef RAY_PORTAL
+    int frameX = _loadInt;
+    int frameY = _loadInt;
+    #endif
+
+    rayIdx = _loadUInt;
+    dim = _loadUInt;
+    pathLength = _loadUInt;
+
+    return ForwardRay(
+        position,
+        direction,
+        wavelength,
+        mediumIdx
+        #ifdef RAY_TRANSIENT
+        ,time
+        #endif
+        #ifndef RAY_PARTICLE
+        ,lin_contrib
+        ,log_contrib
+        #endif
+        #ifdef RAY_PORTAL
+        ,ivec2(frameX, frameY)
         #endif
     );
 }

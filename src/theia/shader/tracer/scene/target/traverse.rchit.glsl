@@ -18,8 +18,12 @@
 #include "tracer/scene/target/nee.glsl"
 #endif
 
-//mapping from TLAS instance -> objectId
+#ifndef RAY_PORTAL
+//mapping from TLAS instance -> objectId. Under RAY_PORTAL the per-scene and
+//per-context ObjectIdTable takes over (see portal.glsl) and MultiScene binds no
+//flat map at all, so the declaration must not survive here.
 readonly buffer ObjectIdMap{ int objectIdMap[]; };
+#endif
 
 layout(location = 0) rayPayloadInEXT TraceData traceData;
 hitAttributeEXT vec2 barys; //filled by default intersection shader
@@ -51,7 +55,7 @@ void traceNEE(
         props,
         #endif
         newDir,
-        gl_LaunchIDEXT.x, dim
+        traceData.idx, dim
     );
     if (result < 0) return;
 
@@ -99,11 +103,11 @@ void sampleTargetMIS(
         props,
         #endif
         pPP,
-        gl_LaunchIDEXT.x, dim
+        traceData.idx, dim
     );
     TargetGuideSample phaseSample = evalTargetGuide(ray.position, dirPhase);
     //sample target guide
-    TargetGuideSample targetSample = sampleTargetGuide(ray.position, gl_LaunchIDEXT.x, dim);
+    TargetGuideSample targetSample = sampleTargetGuide(ray.position, traceData.idx, dim);
     vec3 dirTarget = targetSample.dir;
     float pTT = targetSample.prob;
     //calculate cross probabilities
@@ -162,14 +166,14 @@ void main() {
         hit.worldPos,
         hit.rayNrm,
         params.propagation,
-        gl_LaunchIDEXT.x, dim
+        traceData.idx, dim
     );
     if (traceData.result < 0) return;
 
     //if the surface model requests it, prepare interaction
     #ifdef SurfaceProperties
     SurfaceProperties props = prepareSurface(
-        traceData.ray, hit, gl_LaunchIDEXT.x, dim
+        traceData.ray, hit, traceData.idx, dim
     );
     #endif
 
@@ -196,10 +200,10 @@ void main() {
             #endif
             objectId,
             item,
-            gl_LaunchIDEXT.x, dim
+            traceData.idx, dim
         );
         if (success) {
-            response(item, gl_LaunchIDEXT.x, dim);
+            response(item, traceData.idx, dim);
         }
     }
     #endif
@@ -229,7 +233,7 @@ void main() {
         #ifdef SurfaceProperties
         props,
         #endif
-        gl_LaunchIDEXT.x, dim
+        traceData.idx, dim
     );
     if (traceData.result < 0) return;
 

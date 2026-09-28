@@ -26,7 +26,7 @@ so the loop almost always exits on the first iteration.
 Micro-facet parameters that are constant across a single surface interaction,
 i.e. do not depend on the sampled facet. They are computed once via
 prepare_microfacet() and then passed into sample_microfacet_normal() and
-check_microfacet() on every retry, so the loop-invariant roughness load, the
+microfacet_accept_prob() on every retry, so the loop-invariant roughness load, the
 Rayleigh truncation mass and the tangent basis are not recomputed per iteration
 of the rejection loop.
 */
@@ -66,9 +66,29 @@ vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const 
     return cos(theta) * hit.rayNrm + sin(theta) * cos(phi) * params.tangent1 + sin(theta) * sin(phi) * params.tangent2;
 }
 
-//check that ray hits micro-facet from the front
-bool check_microfacet(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir, uint idx, inout uint dim){
-    return (dot(rayDir, microfacetNormal) < 0.0);
+#ifdef ROUGH_SURFACE_NEE
+//Deterministic twin of sample_microfacet_normal(): the density with which it
+//draws `microfacetNormal`, measured in solid angle (normalized to one over the
+//upper hemisphere). Sampling theta with p(theta) ~ sin(theta)*exp(-theta^2/2sigma^2)
+//and phi uniformly cancels the sin(theta) of the solid angle measure:
+//
+//    p(w_h) = p(theta) / (2*pi*sin(theta)) = exp(-theta^2/2sigma^2) / (2*pi*Z_sigma)
+//
+//Z_sigma = int_0^(pi/2) sin(t)*exp(-t^2/2sigma^2) dt has no closed form and is
+//computed on the host from `roughness_parameter` (see theia.microfacet).
+float eval_microfacet_density(const MicrofacetParams params, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+    float cos_h = dot(microfacetNormal, hit.rayNrm);
+    if (cos_h <= 0.0) return 0.0;
+    float theta = acos(min(cos_h, 1.0));
+    float norm = loadMaterialConstant(MICROFACET_Z_SIGMA, hit.materialIdx);
+    return exp(-theta * theta / (2.0 * params.sigma * params.sigma)) / (TWO_PI * norm);
+}
+#endif
+
+//Probability that this facet is accepted for the given outgoing direction.
+//The caller turns it into a decision by comparing against a single uniform.
+float microfacet_accept_prob(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+    return dot(rayDir, microfacetNormal) < 0.0 ? 1.0 : 0.0;
 }
 
 #endif

@@ -8,7 +8,7 @@ import hephaistos as hp
 from hephaistos.pipeline import PipelineStage, SourceCodeMixin
 from hephaistos.queue import IOQueue
 
-from ctypes import Structure, c_double, c_float, c_int32, c_uint32
+from ctypes import Structure, c_double, c_float, c_int32, c_uint32, c_uint64
 from hephaistos.glsl import buffer_reference
 
 from theia.compiler import createPreamble, compileShader, loadShader
@@ -30,6 +30,7 @@ __all__ = [
     "HitResponse",
     "IntegratingHitResponse",
     "KernelHistogramHitResponse",
+    "SpectrumValueResponse",
     "StoreTimeHitResponse",
     "StoreValueHitResponse",
     "TraceConfig",
@@ -365,6 +366,39 @@ class UniformValueResponse(ValueResponse):
         return loadShader("response/value/uniform.glsl")
 
 
+class SpectrumValueResponse(ValueResponse):
+    """
+    Response function simulating a wavelength-dependent response.
+
+    Parameters
+    ----------
+    spectrumTableAddress: int
+        GPU address of a table containing the wavelength-dependent detection
+        efficiency.
+    
+    Stage Parameters
+    ----------------
+    spectrumTableAddress: int
+        GPU address of a table containing the wavelength-dependent detection
+        efficiency.
+    """
+
+    # the block name must differ from the enclosing HitResponse's "ResponseParams"
+    class ValueParams(Structure):
+        _fields_ = [("spectrumTableAddress", c_uint64)]
+
+    def __init__(self, spectrumTableAddress: int) -> None:
+        super().__init__(
+            nRNGSamples=1,
+            params={"ValueParams": self.ValueParams},
+        )
+        self.setParams(spectrumTableAddress=spectrumTableAddress)
+
+    @property
+    def sourceCode(self) -> str:
+        return loadShader("response/value/spectrum.glsl")
+
+
 class CustomValueResponse(ValueResponse):
     """
     Response function based on user provided code. Code must define the response
@@ -472,6 +506,8 @@ class StoreValueHitResponse(ValueHitResponse):
         *,
         updateResponse: bool = True,
         storeObjectId: bool = True,
+        storePathId: bool = False,
+        storeWavelength: bool = False,
     ) -> None:
         super().__init__(
             response,
@@ -482,12 +518,18 @@ class StoreValueHitResponse(ValueHitResponse):
         fields: list = [("value", c_float), ("time", c_float)]
         if storeObjectId:
             fields.append(("objectId", c_int32))
+        if storeWavelength:
+            fields.append(("wavelength", c_float))
+        if storePathId:
+            fields.append(("pathId", c_uint32))
         item = createCType("Item", fields)
         self._queue = IOQueue(item, capacity, mode="retrieve")
         assert self._queue.tensor is not None
         # save params
         self._capacity = capacity
         self._storeObjectId = storeObjectId
+        self._storePathId = storePathId
+        self._storeWavelength = storeWavelength
         self.setParams(
             _queueAdr=self._queue.tensor.address,
             _queueSize=capacity,
@@ -500,7 +542,9 @@ class StoreValueHitResponse(ValueHitResponse):
 
     @property
     def sourceCode(self) -> str:
-        preamble = createPreamble(RESPONSE_STORE_OBJECT_ID=self._storeObjectId)
+        preamble = createPreamble(RESPONSE_STORE_OBJECT_ID=self._storeObjectId,
+                                  RESPONSE_STORE_PATH_ID=self._storePathId,
+                                  RESPONSE_STORE_WAVELENGTH=self._storeWavelength)
         code = loadShader("response/value/store.glsl")
         return "\n".join(
             [

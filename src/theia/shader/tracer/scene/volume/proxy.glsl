@@ -33,9 +33,10 @@
 float sampleInteractionLength_proxy(
     const PROXY_RAY ray,
     uint volIdx,
+    uint idx,
     inout uint dim
 ) {
-    return sampleInteractionLength_model(ray, gl_LaunchIDEXT.x, dim);
+    return sampleInteractionLength_model(ray, idx, dim);
 }
 
 ResultCode applyVolumeSampled_proxy(
@@ -43,9 +44,10 @@ ResultCode applyVolumeSampled_proxy(
     float dist,
     bool hit,
     uint volIdx,
+    uint idx,
     inout uint dim
 ) {
-    return applyVolumeSampled_model(ray, dist, hit, gl_LaunchIDEXT.x, dim);
+    return applyVolumeSampled_model(ray, dist, hit, idx, dim);
 }
 
 #ifndef RAY_PARTICLE
@@ -55,9 +57,10 @@ ResultCode applyVolume_proxy(
     float dist,
     bool hit,
     uint volIdx,
+    uint idx,
     inout uint dim
 ) {
-    return applyVolume_model(ray, dist, hit, gl_LaunchIDEXT.x, dim);
+    return applyVolume_model(ray, dist, hit, idx, dim);
 }
 
 #endif
@@ -66,6 +69,7 @@ ResultCode applyVolume_proxy(
 
 struct LengthData {
     PROXY_RAY ray;
+    uint idx;
     uint dim;
     float dist;
 };
@@ -74,6 +78,7 @@ layout(location = 0) callableDataEXT LengthData lengthData;
 struct ApplyData{
     PROXY_RAY ray;
     float dist;
+    uint idx;
     uint dim;
     ResultCode result;
 };
@@ -86,10 +91,11 @@ layout(location = 1) callableDataEXT ApplyData applyData;
 #endif
 
 float sampleInteractionLength_proxy(
-    const PROXY_RAY ray, uint volIdx, inout uint dim
+    const PROXY_RAY ray, uint volIdx, uint idx, inout uint dim
 ) {
     uint callableIdx = PROXY_STRIDE * (volIdx - 1) + 0;
     lengthData.ray = ray;
+    lengthData.idx = idx;
     lengthData.dim = dim;
     executeCallableEXT(callableIdx, 0);
     //read back results
@@ -102,6 +108,7 @@ ResultCode applyVolumeSampled_proxy(
     float dist,
     bool hit,
     uint volIdx,
+    uint idx,
     inout uint dim
 ) {
     uint callableIdx = PROXY_STRIDE * (volIdx - 1) + 1;
@@ -109,6 +116,7 @@ ResultCode applyVolumeSampled_proxy(
     //put hit flag into sign of dist
     applyData.dist = hit ? -dist : dist;
     // applyData.dist = copySignBit(dist, hit ? -1.0 : 1.0);
+    applyData.idx = idx;
     applyData.dim = dim;
     executeCallableEXT(callableIdx, 1);
     //read back result
@@ -124,6 +132,7 @@ ResultCode applyVolume_proxy(
     float dist,
     bool hit,
     uint volIdx,
+    uint idx,
     inout uint dim
 ) {
     uint callableIdx = PROXY_STRIDE * (volIdx - 1) + 2;
@@ -131,6 +140,7 @@ ResultCode applyVolume_proxy(
     //put hit flag into sign of dist
     applyData.dist = hit ? -dist : dist;
     // applyData.dist = copySignBit(dist, hit ? -1.0 : 1.0);
+    applyData.idx = idx;
     applyData.dim = dim;
     executeCallableEXT(callableIdx, 1);
     //read back result
@@ -154,7 +164,7 @@ float sampleInteractionLength(
         return 1.0 / 0.0; //+inf
     
     //otherwise delegate call to correct model via proxy
-    return sampleInteractionLength_proxy(ray, volIdx, dim);
+    return sampleInteractionLength_proxy(ray, volIdx, idx, dim);
 }
 
 ResultCode applyVolumeSampled(
@@ -169,7 +179,7 @@ ResultCode applyVolumeSampled(
         return RESULT_CODE_SUCCESS;
 
     //otherwise delegate call to correct model via proxy
-    return applyVolumeSampled_proxy(ray, dist, hit, volIdx, dim);
+    return applyVolumeSampled_proxy(ray, dist, hit, volIdx, idx, dim);
 }
 
 #ifndef RAY_PARTICLE
@@ -186,7 +196,7 @@ ResultCode applyVolume(
         return RESULT_CODE_SUCCESS;
 
     //otherwise delegate call to correct model via proxy
-    return applyVolume_proxy(ray, dist, hit, volIdx, dim);
+    return applyVolume_proxy(ray, dist, hit, volIdx, idx, dim);
 }
 
 #endif

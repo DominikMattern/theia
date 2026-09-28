@@ -3,6 +3,7 @@ import pytest
 import hephaistos as hp
 import numpy as np
 import scipy.stats as stats
+import theia.lookup
 import theia.response
 import theia.units as u
 
@@ -123,6 +124,130 @@ def test_HistogramHitResponse(rng, useDouble: bool):
     #       -> Is there a difference in how we create the histogram and how numpy
     #          does it?
     assert np.allclose(result, exp_hist, rtol=1e-4)
+
+
+@pytest.mark.parametrize("useDouble", [False, True])
+def test_HistogramWavelengthHitResponse(rng, useDouble: bool):
+    # params
+    N = 256 * 1024
+    N_BINS = 50
+    BIN_SIZE = 4.0 * u.nm
+    WAVELENGTH0 = 300 * u.nm
+    WAVELENGTH1 = WAVELENGTH0 + N_BINS * BIN_SIZE
+    NORM = 5e-4
+
+    # create pipeline
+    ray = UnpolarizedRay()
+    value = theia.response.UniformValueResponse()
+    response = theia.response.HistogramWavelengthHitResponse(
+        value,
+        binCount=N_BINS,
+        wavelength0=WAVELENGTH0,
+        binSize=BIN_SIZE,
+        normalization=NORM,
+        bufferCount=64,
+        useDoublePrecision=useDouble,
+    )
+    replay = theia.response.HitReplay(N, ray, response)
+    # fill samples to process
+    samples = replay.queue.view(0)
+    samples["position"] = (10.0 * rng.random((N, 3)) - 5.0) * u.m
+    samples["direction"] = rng.random((N, 3))
+    samples["normal"] = rng.random((N, 3))
+    samples["objectId"] = rng.integers(0, 10, N)
+    samples["wavelength"] = (rng.random((N,)) * (WAVELENGTH1 - WAVELENGTH0) + WAVELENGTH0) * u.nm
+    samples["time"] = rng.random((N,)) * 20 * u.ns
+    samples["contrib"] = rng.random((N,)) * 10.0
+    # run pipeline
+    runPipeline(replay.collectStages())
+
+    # calculate expected results
+    bin_edge = np.arange(N_BINS + 1) * BIN_SIZE + WAVELENGTH0
+    exp_hist, _ = np.histogram(samples["wavelength"], bin_edge, weights=samples["contrib"])
+    exp_hist *= NORM
+    # check results
+    result = response.result(0)
+    # TODO: Somewhat large error independent of float vs double (about the same)
+    #       -> Is there a difference in how we create the histogram and how numpy
+    #          does it?
+    assert np.allclose(result, exp_hist, rtol=1e-4)
+
+
+@pytest.mark.parametrize("particle", [False, True])
+def test_SpectrumValueResponse(rng, particle: bool):
+    # params
+    N = 256 * 1024
+    N_BINS = 32
+    WAVELENGTH0 = 300.0 * u.nm
+    WAVELENGTH1 = 700.0 * u.nm
+    BIN_SIZE = (WAVELENGTH1 - WAVELENGTH0) / N_BINS
+    EFF0, EFF1 = 0.05, 0.95  # efficiency at WAVELENGTH0 / WAVELENGTH1
+    NORM = 1e-3
+
+    efficiency = lambda l: EFF0 + (EFF1 - EFF0) * (l - WAVELENGTH0) / (
+        WAVELENGTH1 - WAVELENGTH0
+    )
+    lam = np.linspace(WAVELENGTH0, WAVELENGTH1, 256)
+    table = theia.lookup.Table(
+        efficiency(lam), (WAVELENGTH0, WAVELENGTH1), interpolation="linear"
+    )
+    tensor = table.upload()  # keep alive until the pipeline ran
+
+    # create pipeline
+    ray = UnpolarizedRay(particle=particle)
+    philox = PhiloxRNG(key=0xC0FFEE)
+    value = theia.response.SpectrumValueResponse(tensor.address)
+    response = theia.response.HistogramWavelengthHitResponse(
+        value,
+        binCount=N_BINS,
+        wavelength0=WAVELENGTH0,
+        binSize=BIN_SIZE,
+        normalization=NORM,
+        bufferCount=64,
+    )
+    replay = theia.response.HitReplay(N, ray, response, rng=philox)
+    # fill samples to process: wavelengths uniform over the histogram's range
+    samples = replay.queue.view(0)
+    samples["position"] = (10.0 * rng.random((N, 3)) - 5.0) * u.m
+    samples["direction"] = rng.random((N, 3))
+    samples["normal"] = rng.random((N, 3))
+    samples["objectId"] = rng.integers(0, 10, N)
+    samples["wavelength"] = (
+        rng.random((N,)) * (WAVELENGTH1 - WAVELENGTH0) + WAVELENGTH0
+    )
+    samples["time"] = rng.random((N,)) * 20.0 * u.ns
+    if not particle:
+        # mean one, so both parametrizations share the same expectation
+        samples["contrib"] = rng.random((N,)) + 0.5
+    # run pipeline
+    runPipeline(replay.collectStages())
+    result = np.asarray(response.result(0))
+    edges = np.arange(N_BINS + 1) * BIN_SIZE + WAVELENGTH0
+
+    if not particle:
+        # here we can reproduce the exact result from the drawn samples
+        exact, _ = np.histogram(
+            samples["wavelength"],
+            edges,
+            weights=efficiency(samples["wavelength"]) * samples["contrib"],
+        )
+        assert np.allclose(result, exact * NORM, rtol=1e-4)
+    else:
+        # expected value per bin: the efficiency is linear, so its mean over a
+        # bin is its value at the bin center
+        eff_bin = efficiency(0.5 * (edges[:-1] + edges[1:]))
+        p = 1.0 / N_BINS  # chance of a hit landing in a given bin
+        exp = N * p * eff_bin * NORM
+
+        # standard deviation per bin: the value is Bernoulli(efficiency), so
+        # E[X^2] = E[X]
+        var = p * eff_bin - (p * eff_bin) ** 2
+        sigma = np.sqrt(N * var) * NORM
+
+        # check result
+        assert np.all(np.abs(result - exp) < 3.0 * sigma)
+        # the sum over all bins is far better constrained than a single bin
+        assert abs(result.sum() - exp.sum()) < 3.0 * np.sqrt((sigma**2).sum())
 
 
 @pytest.mark.parametrize("useDouble", [False, True])

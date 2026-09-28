@@ -370,6 +370,12 @@ class BatchedSpectrumWavelengthSource(WavelengthSource):
     count: int | Iterable[int], default=0
         Number of paths each element owns, broadcast like
         `spectrumTableAddress`.
+    axisValue: float | Iterable[float] | None, default=None
+        Enables a second table axis. `None` leaves the source exactly as it was:
+        no field, and every address is read as a `Table1D`. Otherwise each
+        element carries a coordinate on the second axis, and **NaN selects the
+        1D lookup** for that element - so 1D and 2D spectra may be mixed freely
+        within one batch. Defaults to NaN, i.e. 1D everywhere.
 
     Stage Parameters
     ----------------
@@ -377,6 +383,16 @@ class BatchedSpectrumWavelengthSource(WavelengthSource):
         GPU address of the percent point function of each element's spectrum.
     count: int | Iterable[int]
         Number of paths each element owns.
+    axisValue: float | Iterable[float]
+        Coordinate on the second axis; NaN selects a 1D table. Only present if
+        the source was constructed with `axisValue`.
+
+    Note
+    ----
+    In a 2D table the second axis is the **slow** one (`u`) and the sampled
+    quantile the **fast** one (`v`), matching the row-major layout of `Table2D`.
+    All paths of one batch element then read from the same two rows, which keeps
+    the lookup cache friendly.
     """
 
     name = "Batched Spectrum Wavelength Source"
@@ -387,18 +403,27 @@ class BatchedSpectrumWavelengthSource(WavelengthSource):
         *,
         spectrumTableAddress: int | Iterable[int] = 0,
         count: int | Iterable[int] = 0,
+        axisValue: float | Iterable[float] | None = None,
     ) -> None:
         if spectraPerBatch < 1:
             raise ValueError(
                 f"spectraPerBatch must be at least one, got {spectraPerBatch}")
 
+        # the field is added only when asked for, so a source without a second
+        # axis keeps its old memory layout and compiles a byte identical shader
+        fields = [
+            ("spectrumTableAddress",
+             _make_scalar_array(c_uint64, np.uint64, spectraPerBatch)),
+            ("cumulativeCount",
+             _make_scalar_array(c_uint32, np.uint32, spectraPerBatch)),
+        ]
+        if axisValue is not None:
+            fields.append(
+                ("axisValue",
+                 _make_scalar_array(c_float, np.float32, spectraPerBatch)))
+
         class WavelengthParams(Structure):
-            _fields_ = [
-                ("spectrumTableAddress",
-                 _make_scalar_array(c_uint64, np.uint64, spectraPerBatch)),
-                ("cumulativeCount",
-                 _make_scalar_array(c_uint32, np.uint32, spectraPerBatch)),
-            ]
+            _fields_ = fields
 
         super().__init__(
             nRNGSamples=1,
@@ -406,6 +431,7 @@ class BatchedSpectrumWavelengthSource(WavelengthSource):
             extra={"count"},
         )
         self._spectraPerBatch = spectraPerBatch
+        self._hasSecondAxis = axisValue is not None
 
         def norm(value, name, dtype):
             """Broadcast a scalar over the batch, or check an array's length."""
@@ -417,11 +443,19 @@ class BatchedSpectrumWavelengthSource(WavelengthSource):
                                  f"got {array.size}")
             return array
 
-        self.setParams(
-            spectrumTableAddress=norm(spectrumTableAddress,
-                                      "spectrumTableAddress", np.uint64),
-            count=norm(count, "count", np.uint32),
-        )
+        params = {
+            "spectrumTableAddress": norm(spectrumTableAddress,
+                                         "spectrumTableAddress", np.uint64),
+            "count": norm(count, "count", np.uint32),
+        }
+        if self._hasSecondAxis:
+            params["axisValue"] = norm(axisValue, "axisValue", np.float32)
+        self.setParams(**params)
+
+    @property
+    def hasSecondAxis(self) -> bool:
+        """Whether elements carry a coordinate on a second table axis"""
+        return self._hasSecondAxis
 
     @property
     def spectraPerBatch(self) -> int:
@@ -430,7 +464,10 @@ class BatchedSpectrumWavelengthSource(WavelengthSource):
 
     @property
     def sourceCode(self) -> str:
-        preamble = createPreamble(WAVELENGTH_SOURCE_SPECTRA_PER_BATCH=self._spectraPerBatch)
+        preamble = createPreamble(
+            WAVELENGTH_SOURCE_SPECTRA_PER_BATCH=self._spectraPerBatch,
+            WAVELENGTH_SOURCE_SECOND_AXIS=self._hasSecondAxis,
+        )
         return preamble + loadShader("wavelengthsource/spectrum_batched.glsl")
 
     def _finishParams(self, i: int) -> None:

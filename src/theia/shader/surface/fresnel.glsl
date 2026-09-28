@@ -28,6 +28,8 @@ float fresnelReflectance(float cos_i, float n_i, float n_o) {
  * complex refractive index `n + i*k`, under the incidence angle described by
  * `cos_i`. Uses the exact (real-arithmetic) form of the conductor Fresnel
  * equations.
+
+ * (Implementation from https://github.com/mmp/pbrt-v3/blob/master/src/core/reflection.cpp)
  */
 float fresnelConductor(float cos_i, float n_i, float n, float k) {
     cos_i = clamp(cos_i, 0.0, 1.0);

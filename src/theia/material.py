@@ -102,23 +102,33 @@ class OpticalProperties(str, Enum):
     EXTINCTION_COEFFICIENT = "extinction_coefficient"
     SCATTERING_COEF = "scattering_coef"
     # scintillation
-    # NOTE: Particle-dependent scintillation properties are keyed by appending
-    # the *absolute* PDG code of the particle as a suffix, e.g.
-    # "scintillation_yield_11" (electrons/positrons) or
-    # "scintillation_time_constant_1_1000020040" (alphas). These are looked up
-    # with a fallback to the generic (no-suffix) property, so only the generic
-    # variants are enumerated here; particle-specific keys are free-form.
-    SCINTILLATION_SPECTRUM_1_SAMPLER = "scintillation_spectrum_1_sampler"
-    SCINTILLATION_SPECTRUM_2_SAMPLER = "scintillation_spectrum_2_sampler"
-    SCINTILLATION_SPECTRUM_3_SAMPLER = "scintillation_spectrum_3_sampler"
+    # NOTE: Scintillation properties are named
+    # "scintillation_{key}_{component}_{particleCode}", where the particle code is
+    # the *absolute* PDG code and both suffixes are optional; omitting one makes
+    # the property apply to all components / all particles. The lookup goes from
+    # the most specific name to the least (see
+    # `theia.scintillation._scintillation_components`), so only the fully generic
+    # variants and the per-component ones are enumerated here; the
+    # particle-specific keys are free-form.
+    # "yield" is the only key that takes no component: it is the total number of
+    # photons per deposited energy, which the branching ratios then split up.
+    SCINTILLATION_SPECTRUM_SAMPLER = "scintillation_spectrum_sampler"
+    SCINTILLATION_SPECTRUM_SAMPLER_1 = "scintillation_spectrum_sampler_1"
+    SCINTILLATION_SPECTRUM_SAMPLER_2 = "scintillation_spectrum_sampler_2"
+    SCINTILLATION_SPECTRUM_SAMPLER_3 = "scintillation_spectrum_sampler_3"
+    SCINTILLATION_TIME_CONSTANT = "scintillation_time_constant"
     SCINTILLATION_TIME_CONSTANT_1 = "scintillation_time_constant_1"
     SCINTILLATION_TIME_CONSTANT_2 = "scintillation_time_constant_2"
     SCINTILLATION_TIME_CONSTANT_3 = "scintillation_time_constant_3"
+    SCINTILLATION_BRANCHING_RATIO = "scintillation_branching_ratio"
     SCINTILLATION_BRANCHING_RATIO_1 = "scintillation_branching_ratio_1"
     SCINTILLATION_BRANCHING_RATIO_2 = "scintillation_branching_ratio_2"
     SCINTILLATION_BRANCHING_RATIO_3 = "scintillation_branching_ratio_3"
     SCINTILLATION_YIELD = "scintillation_yield"
     SCINTILLATION_RESOLUTIONSCALE = "scintillation_resolutionscale"
+    SCINTILLATION_RESOLUTIONSCALE_1 = "scintillation_resolutionscale_1"
+    SCINTILLATION_RESOLUTIONSCALE_2 = "scintillation_resolutionscale_2"
+    SCINTILLATION_RESOLUTIONSCALE_3 = "scintillation_resolutionscale_3"
     # polarization
     PHASE_M12 = "phase_m12"
     PHASE_M22 = "phase_m22"
@@ -232,28 +242,37 @@ def checkMedium(
             dq = np.abs(np.diff(quantiles))
             du = 1 / len(dq)
             assert np.allclose(dq, du, rtol=rtol, atol=atol), "Phase sampling function does not reproduce phase function!"
-        # scintillation properties may carry a particle suffix: the absolute PDG
-        # code (e.g. "_11"), "_ion" (shared ion fallback), or none (generic).
-        # Validate every present variant regardless of its concrete suffix.
+        # scintillation properties are "scintillation_{key}_{component}_{particle}"
+        # with both suffixes optional, so anything following the key is accepted
+        # here and every present variant is validated.
+        SUFFIX = r"(?:_\w+)?"
         for name in list(medium.properties):
-            if re.fullmatch(r"scintillation_time_constant_\d(?:_\w+)?", name):
+            if re.fullmatch(rf"scintillation_time_constant{SUFFIX}", name):
                 if (tau := getFloatData(name)) is not None:
                     assert tau >= 0.0, f'Scintillation time constant "{name}" must be non-negative!'
-            elif re.fullmatch(r"scintillation_branching_ratio_\d(?:_\w+)?", name):
+            elif re.fullmatch(rf"scintillation_branching_ratio{SUFFIX}", name):
                 if (eta := getFloatData(name)) is not None:
                     assert 0.0 <= eta <= 1.0, f'Scintillation branching ratio "{name}" must be in [0, 1]!'
-            elif re.fullmatch(r"scintillation_yield(?:_\w+)?", name):
+            elif re.fullmatch(rf"scintillation_yield{SUFFIX}", name):
                 if (y := getFloatData(name)) is not None:
                     assert y >= 0.0, f'Scintillation yield "{name}" must be non-negative!'
-            elif re.fullmatch(r"scintillation_resolutionscale(?:_\w+)?", name):
+            elif re.fullmatch(rf"scintillation_resolutionscale{SUFFIX}", name):
                 if (r := getFloatData(name)) is not None:
                     assert r >= 0.0, f'Scintillation resolutionscale "{name}" must be non-negative!'
-            elif re.fullmatch(r"scintillation_spectrum_\d_sampler(?:_\w+)?", name):
+            elif re.fullmatch(rf"scintillation_spectrum_sampler{SUFFIX}", name):
                 if (beta := getTableData(name)) is not None:
                     assert np.all(beta > 0.0), f'Domain of "{name}" must be positive!'
-            elif re.fullmatch(r"scintillation_rise_time_\d", name):
+            elif re.fullmatch(rf"scintillation_rise_time{SUFFIX}", name):
                 if (t_rise := getFloatData(name)) is not None:
                     assert t_rise >= 0.0, f'Scintillation rise time "{name}" must be non-negative!'
+        # a branching ratio is the share of one component, so it must name one:
+        # without an index it would apply to every component, while whoever wrote
+        # it would more likely expect a split of (ratio, 1 - ratio).
+        for name in medium.properties:
+            if name.startswith("scintillation_branching_ratio"):
+                index = name[len("scintillation_branching_ratio"):].lstrip("_").split("_")[0]
+                assert index in ("1", "2", "3"), \
+                    f'Scintillation branching ratio "{name}" does not name a component!'
         # branching ratios must sum to 1 within each particle variant (suffix)
         ratio_suffixes = set()
         for name in medium.properties:
@@ -805,6 +824,7 @@ class MediumReferenceProperty(Property, ext="medref"):
 def _createTableEntryFromMaterial(
     material: Material,
     mediaTable: PropertyTable,
+    media: Mapping[str, Medium] = {},
 ) -> PropertyTableEntry:
     """Util function converting material to a property table entry"""
     # fetch media names
@@ -840,6 +860,18 @@ def _createTableEntryFromMaterial(
             )
     # add additional material properties
     props.update(material.properties)
+
+    # properties the surface model derives from the material's own ones. They are
+    # deliberately not stored on the Material: they are reconstructed on the next
+    # upload and must not end up in saveMaterials().
+    derived = material.physicModel.derivedMaterialProperties(material, media)
+    if collisions := derived.keys() & material.properties.keys():
+        raise ValueError(
+            f'Material "{material.name}" defines {sorted(collisions)}, which '
+            f'"{material.physicModel.name}" computes itself'
+        )
+    props.update(derived)
+
     return props
 
 
@@ -935,8 +967,20 @@ class MaterialStore:
         self._surfaceModelIndices = [idxMap[m.physicModel] for m in material]
         # create material table
         _map = _createTableEntryFromMaterial
-        materialDict = {m.name: _map(m, self._mediaTable) for m in material}
+        materialDict = {m.name: _map(m, self._mediaTable, mediaDict) for m in material}
         self._materialTable = PropertyTable(materialDict, requiredSlots=materialSlots)
+
+        # Now that all tables exist, let the surface models fill in whatever
+        # needed them as input. Grouping by model only saves preparing the same
+        # model twice (e.g. compiling a shader): the models still see every
+        # material individually, and anything material specific - a roughness, a
+        # table's axis range - has to be read from the tables rather than baked
+        # into that preparation.
+        byModel: dict[int, list[int]] = {}
+        for matIdx, modelIdx in enumerate(self._surfaceModelIndices):
+            byModel.setdefault(modelIdx, []).append(matIdx)
+        for modelIdx, indices in byModel.items():
+            self._surfaceModels[modelIdx].finalizeMaterials(self, indices)
 
     @property
     def header(self) -> dict[str, str]:

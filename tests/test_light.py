@@ -457,11 +457,9 @@ def test_ScintillationDepositionEventSource_fwd(particle: bool):
     startTime = 5.0 * u.ns
     startVelocity = 0.3 * u.c
     endVelocity = 0.6 * u.c
-    energyDeposition = 1000.0 * u.keV
-    photonYield = 10.0 / u.keV
+    expectedPhotons = 10_000.0  # 1 MeV deposited at a yield of 10 / keV
     lam = 500.0 * u.nm
 
-    expectedPhotons = energyDeposition * photonYield
     numPhotons = int(round(expectedPhotons))
     if particle:
         N = numPhotons
@@ -478,8 +476,7 @@ def test_ScintillationDepositionEventSource_fwd(particle: bool):
         startTime=startTime,
         startVelocity=startVelocity,
         endVelocity=endVelocity,
-        energyDeposition=energyDeposition,
-        photonYield=photonYield,
+        expectedPhotonNumber=expectedPhotons,
         timeConstant=0.0,  # no scintillation delay -> time follows only from the transit
         emitParticles=particle,
         numSamples=numPhotons if particle else None,
@@ -545,8 +542,7 @@ def test_ScintillationDepositionEventSource_timeConstant():
         startTime=startTime,
         startVelocity=startVelocity,
         endVelocity=endVelocity,
-        energyDeposition=1000.0 * u.keV,
-        photonYield=10.0 / u.keV,
+        expectedPhotonNumber=10_000.0,
         timeConstant=timeConstant,
     )
     sampler = theia.light.LightSampler(N, light, ray, rng=philox)
@@ -577,8 +573,7 @@ def test_ScintillationDepositionEventSource_bwd():
     N = 32 * 256
     posStart = (1.0, 2.0, 3.0) * u.m
     posEnd = (4.0, -1.0, 5.0) * u.m
-    energyDeposition = 1000.0 * u.keV
-    photonYield = 10.0 / u.keV
+    expectedPhotons = 10_000.0  # 1 MeV deposited at a yield of 10 / keV
 
     # create pipeline (the wavelength source is supplied to the backward sampler)
     ray = UnpolarizedRay()
@@ -591,8 +586,7 @@ def test_ScintillationDepositionEventSource_bwd():
         startTime=5.0 * u.ns,
         startVelocity=0.3 * u.c,
         endVelocity=0.6 * u.c,
-        energyDeposition=energyDeposition,
-        photonYield=photonYield,
+        expectedPhotonNumber=expectedPhotons,
         timeConstant=0.0,
     )
     sampler = BackwardLightSampler(N, light, ray, photon, rng=philox)
@@ -618,8 +612,7 @@ def test_ScintillationDepositionEventSource_bwd():
     exp_dir /= d[:, None]
     assert np.allclose(result["direction"], exp_dir, atol=1e-5)
 
-    cumPhotons = energyDeposition * photonYield
-    exp_contrib = cumPhotons / (4.0 * np.pi * d**2)
+    exp_contrib = expectedPhotons / (4.0 * np.pi * d**2)
     assert np.allclose(result["contrib"], exp_contrib, atol=1e-5)
 
 
@@ -637,11 +630,10 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
     startTime = np.array([5.0, 10.0, 2.0, 8.0]) * u.ns
     startVelocity = np.array([0.3, 0.5, 0.2, 0.4]) * u.c
     endVelocity = np.array([0.6, 0.5, 0.9, 0.4]) * u.c
-    energyDeposition = np.array([100.0, 200.0, 300.0, 400.0]) * u.keV
-    photonYield = 10.0 / u.keV
+    # 100 to 400 keV deposited at a yield of 10 / keV
+    photonsPerEvent = np.array([1000.0, 2000.0, 3000.0, 4000.0])
     lam = 500.0 * u.nm
 
-    photonsPerEvent = energyDeposition * photonYield
     # in particle mode the sampler emits exactly sum(numSamples) particles
     number = np.round(photonsPerEvent).astype(int)
     cumulative = np.cumsum(number)
@@ -662,8 +654,7 @@ def test_ScintillationDepositionEventSource_multiEvent(particle: bool):
         startTime=startTime,
         startVelocity=startVelocity,
         endVelocity=endVelocity,
-        energyDeposition=energyDeposition,
-        photonYield=photonYield,
+        expectedPhotonNumber=photonsPerEvent,
         timeConstant=0.0,
         emitParticles=particle,
         numSamples=number if particle else None,
@@ -732,8 +723,8 @@ def test_ScintillationDepositionEventSource_multiEvent_bwd():
     startTime = np.array([5.0, 10.0, 2.0, 8.0]) * u.ns
     startVelocity = np.array([0.3, 0.5, 0.2, 0.4]) * u.c
     endVelocity = np.array([0.6, 0.5, 0.9, 0.4]) * u.c
-    energyDeposition = np.array([100.0, 200.0, 300.0, 400.0]) * u.keV
-    photonYield = 10.0 / u.keV
+    # 100 to 400 keV deposited at a yield of 10 / keV
+    photonsPerEvent = np.array([1000.0, 2000.0, 3000.0, 4000.0])
 
     # create pipeline (backward mode uses its own BATCH_SIZE > 1 code path)
     ray = UnpolarizedRay()
@@ -747,8 +738,7 @@ def test_ScintillationDepositionEventSource_multiEvent_bwd():
         startTime=startTime,
         startVelocity=startVelocity,
         endVelocity=endVelocity,
-        energyDeposition=energyDeposition,
-        photonYield=photonYield,
+        expectedPhotonNumber=photonsPerEvent,
         timeConstant=0.0,
     )
     sampler = BackwardLightSampler(N, light, ray, photon, rng=philox)
@@ -761,7 +751,6 @@ def test_ScintillationDepositionEventSource_multiEvent_bwd():
 
     seg = ends - starts
     L = np.linalg.norm(seg, axis=1)
-    photonsPerEvent = energyDeposition * photonYield
 
     # each backward ray importance-samples an event; recover it from the segment
     # the sampled position lies on

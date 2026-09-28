@@ -8,10 +8,15 @@ from hephaistos.queue import dumpQueue
 from theia.camera import DiskCamera, FlatCamera, PointCamera, SphereCamera
 from theia.device import isRayTracingEnabled
 from theia.light import ConstWavelengthSource, UniformWavelengthSource
-from theia.light import SphericalLightSource
+from theia.light import ConeLightSource, SphericalLightSource
 from theia.material import Material, MaterialStore
 from theia.property import TableProperty
-from theia.model import DispersionFreeMedium, HenyeyGreensteinPhaseFunction
+from theia.model import (
+    BK7Model,
+    DispersionFreeMedium,
+    HenyeyGreensteinPhaseFunction,
+    PureWaterModel,
+)
 from theia.ray import UnpolarizedRay
 from theia.response import (
     HistogramHitResponse,
@@ -20,14 +25,17 @@ from theia.response import (
     UniformValueResponse,
 )
 from theia.random import PhiloxRNG
-from theia.scene import MeshStore, Scene, Transform
+from theia.scene import linkPortals, MeshStore, MultiScene, Scene, Transform
 from theia.surface import (
     AbsorbingSurface,
+    BorderSurface,
     DielectricSurface,
     LambertianReflectingSurface,
 )
 from theia.target import FlatTargetGuide, InnerSphereTarget, SphereTargetGuide
 from theia.trace import (
+    EventStatisticCallback,
+    MultiSceneForwardTracer,
     SceneBackwardTracer,
     SceneBackwardTargetTracer,
     SceneForwardTracer,
@@ -1014,3 +1022,199 @@ def test_SceneBackwardTracer_SurfaceNEE() -> None:
     err = abs(est.item() / budget - 1.0)
     # TODO: For whatever reason this one converges rather slowly
     assert err < 1e-3
+
+
+def test_MultiSceneForwardTracer() -> None:
+    """
+    Checks the MultiSceneForwardTracer against the SceneForwardTracer by tracing
+    the very same geometry twice: once as a single flat scene, once split into
+    sub-scenes entered through portals. Both must produce the same signal in
+    each of the three detectors.
+
+    Scene: a cone source in water shines along +x onto two glass spheres placed
+    behind each other and rotated differently. Each sphere has a dielectric
+    surface and holds an off-centre, rotated border box containing a small cube
+    detector; a large cube detector sits behind both spheres. Placing the inner
+    geometry off-centre is what makes the differing sphere rotations observable
+    at the detectors.
+
+    In the multi-scene version the sphere surfaces and the border boxes become
+    portals, giving two sub-scenes - the sphere interior and the border box
+    interior - each entered through TWO contexts, one per sphere. The sphere
+    portal is the dielectric glass/water surface itself rather than a neutral
+    box, so a portal coupled to a real surface model gets covered as well: a
+    refracted photon changes both medium and frame, a reflected one stays put.
+
+    Both sub-scenes are built ONCE, so the small detector exists as a single
+    instance and tells the spheres apart through a per-context detector id, which
+    the flat scene resolves with two separate instances instead. Comparing the
+    detectors individually thus verifies the full portal mapping, including which
+    context a photon carries back out of a shared sub-scene.
+    """
+    if not isRayTracingEnabled():
+        pytest.skip("ray tracing not supported")
+
+    # scene settings
+    lam = 500.0 * u.nm  # inside the validity range of both media models
+    budget = 1.0
+    r_sphere = 0.50 * u.m  # the glass sphere, which is also the portal
+    s_border = 0.15 * u.m  # half edge of the border box
+    s_det = 0.07 * u.m  # half edge of the small detector cube
+    box_off = (0.0, 0.10, 0.06) * u.m  # border box centre, sphere-local
+    box_rot = (1.0, 1.0, 0.0, 25.0)  # border box rotation, sphere-local
+    det_off = (0.05, 0.0, -0.03) * u.m  # detector centre, box-local
+    sphere_pos = [(2.0, 0.0, 0.0) * u.m, (4.0, 0.0, 0.0) * u.m]
+    sphere_rot = [(0.0, 0.0, 1.0, 35.0), (0.0, 1.0, 0.0, 70.0)]  # differ!
+    big_pos = (8.0, 0.0, 0.0) * u.m
+    s_big = 2.0 * u.m
+    light_pos = (0.0, 0.0, 0.0) * u.m
+    cos_opening = 0.95
+    # tracer settings
+    batch_size = 64 * 1024
+    n_batches = 16
+    max_length = 24
+
+    # Create materials. "glass_portal" is a real dielectric surface that also
+    # carries the PORTAL flag ("PRT" = portal + reflect + transmit), so the very
+    # same material refracts in the flat scene and refracts AND switches frame in
+    # the split one - other tracers simply ignore the flag. "border_glass" has
+    # the same medium on both sides, making a crossing a pure teleport.
+    # Both media keep the default Transparent volume model, so neither absorbs
+    # nor scatters and no energy goes missing between the two runs.
+    water = PureWaterModel().createMedium()
+    glass = BK7Model().createMedium()
+    matStore = MaterialStore(
+        [
+            Material("glass_portal", glass, water, DielectricSurface(), flags="PRT"),
+            Material("border_glass", glass, glass, BorderSurface(), flags="P*"),
+            Material("det_small", glass, glass, AbsorbingSurface(), flags="D"),
+            Material("det_big", water, water, AbsorbingSurface(), flags="D"),
+        ]
+    )
+    waterIdx = matStore.media["water"]
+
+    # Placements. The local ones are used verbatim inside the sub-scenes; the
+    # frame maps compose them into world coordinates for the flat scene and are
+    # exactly the maps the portals have to reproduce.
+    store = MeshStore({"sphere": "assets/sphere.stl", "cube": "assets/cube.ply"})
+    t_sphere = Transform.TRS(scale=r_sphere)  # sub-scene A
+    t_borderBox = Transform.TRS(scale=s_border)  # sub-scene B
+    t_det = Transform.TRS(scale=s_det, translate=det_off)  # sub-scene B
+    t_big = Transform.TRS(scale=s_big, translate=big_pos)  # main scene
+    # sub-scene A (sphere interior) -> world, one per sphere
+    frameA = [
+        Transform.TRS(rotate=rot, translate=pos)
+        for rot, pos in zip(sphere_rot, sphere_pos)
+    ]
+    # sub-scene B (border box interior) -> sub-scene A, shared by both spheres
+    frameB = Transform.TRS(rotate=box_rot, translate=box_off)
+
+    # ---- flat reference scene: every piece placed in world coordinates ---- #
+    flatInstances = []
+    for k, f in enumerate(frameA):
+        flatInstances += [
+            store.createInstance("sphere", "glass_portal", f @ t_sphere),
+            store.createInstance("cube", "border_glass", f @ frameB @ t_borderBox),
+            # the two small detectors are distinct instances here
+            store.createInstance(
+                "cube", "det_small", f @ frameB @ t_det, detectorId=k
+            ),
+        ]
+    flatInstances.append(store.createInstance("cube", "det_big", t_big, detectorId=2))
+    flatScene = Scene(flatInstances, matStore)
+
+    # ---- multi-scene: the same geometry behind portals -------------------- #
+    # Sub-scene B is the interior of the border box, sub-scene A the interior of
+    # a sphere; both are entered with one context per sphere and therefore built
+    # once. Sub-scene A's boundary is the dielectric surface itself, so a portal
+    # carrying a real surface model is covered too.
+    borderBoxB = store.createPortal("cube", "border_glass", t_borderBox, contextCount=2)
+    detB = store.createInstance("cube", "det_small", t_det, detectorId=[0, 1])
+    sphereA = store.createPortal("sphere", "glass_portal", t_sphere, contextCount=2)
+    borderBoxA = store.createPortal(
+        "cube", "border_glass", frameB @ t_borderBox, contextCount=2
+    )
+    # world scene: the two sphere portals plus the large detector, one context
+    mainPortals = [
+        store.createPortal("sphere", "glass_portal", f @ t_sphere) for f in frameA
+    ]
+    bigDet = store.createInstance("cube", "det_big", t_big, detectorId=2)
+
+    # transition graph, all edges symmetric here
+    for k, p in enumerate(mainPortals):
+        linkPortals(p, sphereA, [(0, k)])  # world <-> A, context k per sphere
+    linkPortals(borderBoxA, borderBoxB, [(0, 0), (1, 1)])  # A <-> B, per context
+
+    multiScene = MultiScene(
+        [[*mainPortals, bigDet], [sphereA, borderBoxA], [borderBoxB, detB]],
+        matStore,
+    )
+
+    def run(multi: bool):
+        """Traces the scene once per batch and returns the per-batch results"""
+        rng = PhiloxRNG(key=0xC0FFEE)
+        photons = ConstWavelengthSource(lam)
+        light = ConeLightSource(
+            photons,
+            mediumIdx=waterIdx,
+            position=light_pos,
+            direction=(1.0, 0.0, 0.0),
+            cosOpeningAngle=cos_opening,
+            timeRange=(0.0, 0.0),
+            budget=budget,
+        )
+        response = IntegratingHitResponse(UniformValueResponse(), detectorCount=3)
+        stats = EventStatisticCallback()
+        common = (batch_size, UnpolarizedRay(), light, response, rng)
+        kwargs = dict(
+            callback=stats,
+            maxPathLength=max_length,
+            sampleCoefficient=0.0,  # no volume scattering
+        )
+        if multi:
+            tracer = MultiSceneForwardTracer(*common, multiScene, **kwargs)
+        else:
+            tracer = SceneForwardTracer(*common, flatScene, **kwargs)
+        rng.autoAdvance = tracer.nRNGSamples
+
+        results: list[np.ndarray] = []
+        process = lambda c, b, a: results.append(
+            np.array(response.result(c), dtype=np.float64)
+        )
+        scheduler = pl.PipelineScheduler(
+            pl.Pipeline(tracer.collectStages()), processFn=process
+        )
+        scheduler.schedule([{}] * n_batches)
+        scheduler.wait()
+        scheduler.destroy()  # free resources before building the next tracer
+        hp.checkCurrentDeviceHealth()
+        return np.array(results), stats
+
+    flat, flatStats = run(multi=False)
+    multi, multiStats = run(multi=True)
+
+    # a media inconsistency would silently kill photons and bias the comparison
+    for stats in (flatStats, multiStats):
+        assert stats.mismatch == 0
+        assert stats.error == 0
+    assert flatStats.created == multiStats.created  # same primary rays
+    # portals must actually have been crossed, otherwise the sub-scenes were
+    # never entered and the detectors below would agree for the wrong reason
+    assert multiStats.volume > 0
+
+    # Both tracers estimate the same integral, but consume their random numbers
+    # along different code paths, so we compare the batch means against the
+    # spread we actually measured instead of a hand-picked tolerance.
+    mFlat, mMulti = flat.mean(0), multi.mean(0)
+    seFlat = flat.std(0, ddof=1) / np.sqrt(n_batches)
+    seMulti = multi.std(0, ddof=1) / np.sqrt(n_batches)
+    sigma = np.hypot(seFlat, seMulti)
+
+    # all three detectors must actually see light, else there is nothing to compare
+    assert np.all(mFlat > 0.0)
+    assert np.all(mMulti > 0.0)
+    # The two spheres must give different signals - otherwise swapping the two
+    # portal contexts would go unnoticed and the comparison below proves nothing.
+    assert abs(mFlat[0] - mFlat[1]) > 5.0 * np.hypot(seFlat[0], seFlat[1])
+    # the actual check: same signal in every detector
+    assert np.all(np.abs(mMulti - mFlat) < 5.0 * sigma)

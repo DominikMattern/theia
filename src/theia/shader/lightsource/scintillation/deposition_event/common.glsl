@@ -25,6 +25,12 @@ readonly buffer LightParams {
     // expected photons / numRays.
     float photonsPerRay[EVENTS_PER_BATCH];
 #endif
+
+#ifdef LIGHT_SOURCE_CHERENKOV
+    // 0 = scintillation, 1 = Cherenkov. Rays of one element occupy a contiguous
+    // range of path ids, so whole warps take the same branch on this.
+    uint mode[EVENTS_PER_BATCH];
+#endif
 } lightParams;
 
 /**

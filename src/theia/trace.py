@@ -5,11 +5,11 @@ from itertools import repeat
 
 import hephaistos as hp
 from hephaistos.pipeline import PipelineStage, SourceCodeMixin
+from hephaistos.queue import QueueTensor
 
 from ctypes import Structure, c_float, c_int32, c_uint32, c_uint64
 from ctypes import addressof, memset, sizeof
 from hephaistos.glsl import buffer_reference, vec3
-import numpy as np
 from numpy.ctypeslib import as_array
 
 from theia.camera import Camera
@@ -22,11 +22,11 @@ from theia.compiler import (
 )
 from theia.device import getEnabledRayTracingFeatures, isRayTracingEnabled
 from theia.light import LightSource, WavelengthSource
-from theia.material import MaterialStore, MaterialFlags
+from theia.material import MaterialStore
 from theia.random import RNG
 from theia.ray import RayModel
 from theia.response import HitResponse, TraceConfig
-from theia.scene import RectBBox, Scene
+from theia.scene import MultiScene, RectBBox, Scene, SceneBase
 from theia.surface import SurfaceModel
 from theia.target import Target, TargetGuide
 from theia.volume import VolumeModel
@@ -40,6 +40,7 @@ from typing import Callable, Literal, TypeVar, overload
 
 
 __all__ = [
+    "DEFAULT_WAVE_SCHEDULE",
     "EmptyEventCallback",
     "EventResultCode",
     "EventStatisticCallback",
@@ -54,6 +55,7 @@ __all__ = [
     "VolumeBackwardTracer",
     "VolumeDirectTracer",
     "VolumeForwardTracer",
+    "WavefrontSceneForwardTracer",
 ]
 
 
@@ -376,6 +378,7 @@ class Tracer(PipelineStage):
         maxHitsPerRay: int,
         rayOffsetScale: float | None = None,
         rayOffsetOrigin: float | None = None,
+        rayOffsetThreshold: float | None = None,
     ) -> None:
         super().__init__(params, extra)
 
@@ -392,6 +395,7 @@ class Tracer(PipelineStage):
         self._maxHitsPerRay = maxHitsPerRay
         self._rayOffsetScale = rayOffsetScale
         self._rayOffsetOrigin = rayOffsetOrigin
+        self._rayOffsetThreshold = rayOffsetThreshold
         self.batchSize = batchSize
         response.prepare(self._getTraceConfig(), ray)
 
@@ -436,18 +440,27 @@ class Tracer(PipelineStage):
     @property
     def rayOffsetScale(self) -> float | None:
         """
-        Override for the self-intersection offset applied to coordinates with 
-        (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default.
+        Override for the self-intersection offset applied to coordinates at or
+        above `rayOffsetThreshold`, in ULP. `None` keeps the shader default.
         """
         return self._rayOffsetScale
 
     @property
     def rayOffsetOrigin(self) -> float | None:
         """
-        Override for the absolute self-intersection offset applied to coordinates 
-        with (`|coordinate| < 1/32`). `None` keeps the shader default.
+        Override for the absolute self-intersection offset applied to coordinates
+        below `rayOffsetThreshold`. `None` keeps the shader default.
         """
         return self._rayOffsetOrigin
+
+    @property
+    def rayOffsetThreshold(self) -> float | None:
+        """
+        Override for the `|coordinate|` at which the self-intersection offset
+        switches from the absolute `rayOffsetOrigin` to `rayOffsetScale` ULP.
+        `None` keeps the shader default (1/32).
+        """
+        return self._rayOffsetThreshold
 
     def _rayOffsetMacros(self) -> dict[str, float]:
         """
@@ -460,6 +473,8 @@ class Tracer(PipelineStage):
             macros["RAY_OFFSET_SCALE"] = float(self._rayOffsetScale)
         if self._rayOffsetOrigin is not None:
             macros["RAY_OFFSET_ORIGIN"] = float(self._rayOffsetOrigin)
+        if self._rayOffsetThreshold is not None:
+            macros["RAY_OFFSET_THRESHOLD"] = float(self._rayOffsetThreshold)
         return macros
 
     @property
@@ -1243,6 +1258,19 @@ class VolumeDirectTracer(Tracer):
         return [self._program.dispatch(groups)]
 
 
+def _requireSingleScene(scene, name: str) -> None:
+    """
+    Rejects a MultiScene where only a single Scene is supported. Portals are
+    forward-only and the tracer would silently ignore the sub-scenes otherwise,
+    tracing just the world scene.
+    """
+    if isinstance(scene, MultiScene):
+        raise ValueError(
+            f"{name} does not support portals; use MultiSceneForwardTracer "
+            "for a MultiScene."
+        )
+
+
 def _checkVolumeModels(scene: Scene, mode: Literal["forward", "backward"]):
     models = scene.materials.volumeModels
     if mode == "forward":
@@ -1457,6 +1485,7 @@ class SceneDirectTracer(Tracer):
         callback: TraceEventCallback = EmptyEventCallback(),
         maxTime: float = float("inf"),
     ) -> None:
+        _requireSingleScene(scene, "SceneDirectTracer")
         # we need ray tracing for this
         if not isRayTracingEnabled():
             raise RuntimeError("The device does not support ray tracing")
@@ -1527,7 +1556,7 @@ class SceneDirectTracer(Tracer):
         builder = RayTracingPipelineBuilder()
         builder.addRayGen(rayGen_code)
         builder.addMissShaders(miss_code)
-        nSbtHitEntries = len(scene.materials.surfaceModels) * Scene.sbtHitStride
+        nSbtHitEntries = len(scene.materials.surfaceModels) * SceneBase.sbtHitStride
         builder.addHitShaders([None] * nSbtHitEntries)
         self._pipeline, self._sbt = builder.finish()
         scene.bindParams(self._pipeline)
@@ -1656,10 +1685,15 @@ class SceneBackwardTracer(Tracer):
             This should only be done when necessary and with caution.
     rayOffsetOrigin: float | None, default=None
         Optional override for the absolute self-intersection offset applied to 
-        coordinates with (`|coordinate| < 1/32`). `None` keeps the shader default
+        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
         (`1/65536`). 
-
-        See also `rayOffsetScale`.
+    rayOffsetThreshold: float | None, default=None
+        Optional override for the `|coordinate|` at which the self-intersection
+        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
+        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
+        coordinates to the ULP branch, which scales with the coordinate, and thus
+        allows a much smaller absolute offset without it becoming a no-op just
+        below the threshold - one ULP there is `threshold * 2^-23`.
 
     Stage Parameters
     ----------------
@@ -1710,7 +1744,9 @@ class SceneBackwardTracer(Tracer):
         disableDirectLighting: bool = False,
         rayOffsetScale: float | None = None,
         rayOffsetOrigin: float | None = None,
+        rayOffsetThreshold: float | None = None,
     ) -> None:
+        _requireSingleScene(scene, "SceneBackwardTracer")
         # we need ray tracing for this
         if not isRayTracingEnabled():
             raise RuntimeError("The device does not support ray tracing")
@@ -1755,6 +1791,7 @@ class SceneBackwardTracer(Tracer):
             maxHitsPerRay=maxHitsPerRay,
             rayOffsetScale=rayOffsetScale,
             rayOffsetOrigin=rayOffsetOrigin,
+            rayOffsetThreshold=rayOffsetThreshold,
         )
         # save params
         self._photons = wavelengthSource
@@ -1931,6 +1968,165 @@ class SceneBackwardTracer(Tracer):
             return [self._pipeline.traceRays(self.capacity, 1, 1, **self._sbt)]
 
 
+class _WaveState:
+    """
+    Device state and command sequence of the wavefront variant of the scene
+    target tracer, see `WavefrontSceneForwardTracer`.
+
+    Holds the two queues the paths still alive are compacted into, one indirect
+    launch counter per wave, and the per-dispatch parameter block. The queues
+    ping-pong: wave `w` reads `queues[(w - 1) % 2]` and appends to
+    `queues[w % 2]`.
+
+    Parameters
+    ----------
+    schedule: int[]
+        Number of trace iterations each dispatch performs.
+    maxPathLength: int
+        Maximum number of iterations of the whole path.
+    ray: RayModel
+        Model describing the trace state to store between waves.
+    portal: bool
+        Whether rays carry a frame, i.e. whether sub-scenes are traced.
+    capacity: int
+        Maximum number of paths a wave can hold.
+    """
+
+    class _IndirectRayCount(Structure):
+        """
+        Launch dimensions `traceRaysIndirect()` fetches from device memory, i.e.
+        Vulkan's VkTraceRaysIndirectCommandKHR. Only `width` is ever written by a
+        shader - it doubles as the atomic counter of a wave queue - while the other
+        two stay at one.
+        """
+
+        _fields_ = [("width", c_uint32), ("height", c_uint32), ("depth", c_uint32)]
+
+
+    class _WaveParams(Structure):
+        """Mirrors the `WaveParams` block in tracer/scene/target/wave.glsl"""
+
+        _fields_ = [
+            ("srcQueue", buffer_reference),
+            ("dstQueue", buffer_reference),
+            ("dstCounter", buffer_reference),
+            ("iterations", c_uint32),
+            ("capacity", c_uint32),
+            ("firstWave", c_uint32),
+        ]
+
+    def __init__(
+        self,
+        schedule: Sequence[int],
+        maxPathLength: int,
+        ray: RayModel,
+        portal: bool,
+        capacity: int,
+    ) -> None:
+        # Normalize the schedule: never trace beyond maxPathLength, and cover any
+        # remainder with a final wave, so a path the megakernel would have
+        # followed to its end does not get silently truncated here.
+        waves: list[int] = []
+        total = 0
+        for k in schedule:
+            k = int(k)
+            if k < 1:
+                raise ValueError("wave lengths must be positive!")
+            k = min(k, maxPathLength - total)
+            if k < 1:
+                break
+            waves.append(k)
+            total += k
+        if total < maxPathLength:
+            waves.append(maxPathLength - total)
+        self._schedule = waves
+
+        # Trace state handed from one wave to the next, as a structure of arrays.
+        # The queues carry no counter of their own: a counter serving as indirect
+        # launch argument has to be a (count, 1, 1) triple, which is a different
+        # layout, so they live in their own tensor below.
+        self._item = ray.waveItem(portal=portal)
+        self._queues = [
+            QueueTensor(self._item, capacity, skipCounter=True) for _ in range(2)
+        ]
+        # Wave w is launched with counters[w - 1] rays and fills counters[w]. The
+        # last one is written but never read.
+        n = len(waves)
+        self._counters = hp.ArrayTensor(self._IndirectRayCount, n)
+        self._reset = hp.ArrayBuffer(self._IndirectRayCount, n)
+        for c in self._reset:
+            c.width, c.height, c.depth = 0, 1, 1
+        # Per dispatch parameters. These are static, so upload them once here.
+        self._params = []
+        for w, k in enumerate(waves):
+            p = self._WaveParams()
+            p.srcQueue.value = self._queues[(w - 1) % 2]  # unused by the first
+            p.dstQueue.value = self._queues[w % 2]
+            p.dstCounter.value = self._counters.address + w * sizeof(self._IndirectRayCount)
+            p.iterations = k
+            p.capacity = capacity
+            p.firstWave = 1 if w == 0 else 0
+            self._params.append(hp.Tensor(sizeof(p), addr=addressof(p)))
+
+    @property
+    def item(self) -> type[Structure]:
+        """Structure describing the trace state stored between waves"""
+        return self._item
+
+    @property
+    def schedule(self) -> list[int]:
+        """Number of trace iterations each dispatch performs"""
+        return list(self._schedule)
+
+    def counts(self) -> list[int]:
+        """
+        Number of paths that survived each wave in the batch that ran last, i.e.
+        the launch size of the following wave.
+
+        Retrieves the counters from the device and thus must not be called while
+        a batch is still in flight.
+        """
+        buffer = hp.ArrayBuffer(self._IndirectRayCount, len(self._schedule))
+        hp.execute(hp.retrieveTensor(self._counters, buffer))
+        return [c.width for c in buffer]
+
+    def run(
+        self,
+        pipeline: hp.RayTracingPipeline,
+        sbt: dict,
+        traceParams: hp.Tensor,
+        batchSizeOffset: int,
+    ) -> list[hp.Command]:
+        """Records the wave chain of a single batch."""
+        # all counters start at (0, 1, 1)
+        cmds: list[hp.Command] = [hp.updateTensor(self._reset, self._counters)]
+        for w in range(len(self._schedule)):
+            # The parameters differ per dispatch, and a command snapshots the
+            # bindings it was created with, so rebind before recording each wave.
+            pipeline.bindParams(WaveParams=self._params[w])
+            if w == 0:
+                # The first wave samples the light source and is sized by the
+                # batch size in the trace params, exactly like the megakernel.
+                cmds.append(
+                    pipeline.traceRaysIndirect(
+                        traceParams, offset=batchSizeOffset, **sbt
+                    )
+                )
+            else:
+                # ... every later one by the number of survivors of its
+                # predecessor. The barrier covers the queue contents; the one for
+                # the indirect read itself comes with the command.
+                cmds.append(hp.flushMemory())
+                cmds.append(
+                    pipeline.traceRaysIndirect(
+                        self._counters,
+                        offset=(w - 1) * sizeof(self._IndirectRayCount),
+                        **sbt,
+                    )
+                )
+        return cmds
+
+
 class _SceneTargetTracer(Tracer):
     """
     Common base class for `SceneForwardTracer` and `SceneBackwardTargetTracer`
@@ -1958,7 +2154,7 @@ class _SceneTargetTracer(Tracer):
         source: LightSource | Camera,
         response: HitResponse,
         rng: RNG,
-        scene: Scene,
+        scene: SceneBase,
         *,
         lamSource: WavelengthSource | None,
         capacity: int | None,
@@ -1971,7 +2167,8 @@ class _SceneTargetTracer(Tracer):
         disableDirectLighting: bool,
         rayOffsetScale: float | None = None,
         rayOffsetOrigin: float | None = None,
-        subScenes: Sequence[Scene] | None = None,
+        rayOffsetThreshold: float | None = None,
+        waveSchedule: Sequence[int] | None = None,
     ) -> None:
         # we need ray tracing for this
         if not isRayTracingEnabled():
@@ -2024,6 +2221,7 @@ class _SceneTargetTracer(Tracer):
             maxHitsPerRay=maxPathLength - 1 if disableDirectLighting else maxPathLength,
             rayOffsetScale=rayOffsetScale,
             rayOffsetOrigin=rayOffsetOrigin,
+            rayOffsetThreshold=rayOffsetThreshold,
         )
         # save params
         self._source = source
@@ -2044,29 +2242,36 @@ class _SceneTargetTracer(Tracer):
             _rayCountZ=1,
         )
 
-        # portal / multi-scene setup (see MultiSceneForwardTracer)
-        self._subScenes = list(subScenes) if subScenes else []
-        if self._subScenes:
-            if direction != "forward":
-                raise ValueError(
-                    "Sub-scenes (portals) are only supported for forward tracing"
-                )
-            if targetGuide is not None:
-                raise ValueError(
-                    "Next-event estimation (targetGuide) is not yet supported "
-                    "with sub-scenes"
-                )
-            self._buildPortalTables(scene)
-
         # prepare code compilation
         # if we have only a single volume model (besides transparent) we can
         # inline the volume module and skip unnecessary creation of callables
         inlineVolModule = len(volModels) <= 2
         self._dispatchIndirect = getEnabledRayTracingFeatures().indirectDispatch
+        # optionally split the trace loop over several dispatches, compacting the
+        # paths still alive in between (see WavefrontSceneForwardTracer)
+        self._wave: _WaveState | None = None
+        if waveSchedule is not None:
+            if direction != "forward":
+                raise ValueError("Wavefront tracing requires a light source!")
+            if targetGuide is not None:
+                raise ValueError("Wavefront tracing does not support a target guide!")
+            if not self._dispatchIndirect:
+                raise RuntimeError(
+                    "Wavefront tracing needs indirect dispatch, which this device "
+                    "does not support"
+                )
+            self._wave = _WaveState(
+                waveSchedule,
+                nTraces,
+                ray,
+                bool(scene.macros.get("RAY_PORTAL", False)),
+                self.capacity,
+            )
         preamble = createPreamble(
             DISABLE_DIRECT_LIGHTING=disableDirectLighting,
             DISABLE_NEE=targetGuide is None,
             DISPATCH_INDIRECT=self._dispatchIndirect,
+            WAVE_TRACER=self._wave is not None,
             INLINE_VOLUME_MODEL=inlineVolModule,
             PATH_LENGTH=nTraces,
             TRACE_DIRECTION=f"TRACE_DIRECTION_{direction.upper()}",
@@ -2074,7 +2279,7 @@ class _SceneTargetTracer(Tracer):
             RAY_TRACING_PIPELINE=True,
             TRACE_RNG_STRIDE=nRngLoop,
             **self._rayOffsetMacros(),
-            **self._portalMacros(),
+            **scene.macros,
         )
         headers = {
             "callback.glsl": callback.sourceCode,
@@ -2126,219 +2331,6 @@ class _SceneTargetTracer(Tracer):
         maxRecursion = 1 if targetGuide is None else 2
         self._pipeline, self._sbt = builder.finish(maxRecursionDepth=maxRecursion)
         scene.bindParams(self._pipeline)
-        self._bindPortalTables(self._pipeline)
-
-    # ----- portal / multi-scene hooks ------------------------------------- #
-    def _portalMacros(self) -> dict:
-        """Preamble macros enabling portal support, or empty if no sub-scenes."""
-        return {"RAY_PORTAL": True} if self._subScenes else {}
-
-    @staticmethod
-    def _splitAddr(address: int) -> tuple[int, int]:
-        """Split a 64-bit device address into (lo, hi) uint32 (a uvec2)."""
-        return (address & 0xFFFFFFFF, (address >> 32) & 0xFFFFFFFF)
-
-    def _portalScenes(self, scene: Scene) -> list[Scene]:
-        """All scenes in sceneId order: main (0) followed by the sub-scenes."""
-        return [scene, *self._subScenes]
-
-    @staticmethod
-    def _portalInstanceLocations(scenes: Sequence[Scene]) -> dict[int, tuple[int, int]]:
-        """Map id(MeshInstance) -> (sceneId, gl_InstanceID) across all scenes."""
-        loc: dict[int, tuple[int, int]] = {}
-        for sid, sc in enumerate(scenes):
-            for iid, inst in enumerate(sc.instances):
-                loc[id(inst)] = (sid, iid)
-        return loc
-
-    def _validatePortals(self, scene: Scene) -> None:
-        """
-        Validate the portal transition FSM and raise a clear error on misuse:
-          - a portal instance is one with setPortalLinks; its material MUST carry
-            the PORTAL flag on both sides (and vice versa) so the shader's
-            MATERIAL_PORTAL_BIT gate matches the transition tables,
-          - the main scene defines at least one portal,
-          - all portals within a scene declare the same number of contexts,
-          - every link targets a portal instance in some scene, with a matching
-            mesh key and an in-range nextInstanceId (closed, total FSM),
-          - the net cross-portal map M = T_arrival . T_source^-1 is a rigid
-            isometry (matched scale on both boxes).
-        """
-        scenes = self._portalScenes(scene)
-        matTable = scene.materials.materials  # PropertyTable of the shared MaterialStore
-        loc = self._portalInstanceLocations(scenes)
-
-        def _hasPortalFlag(name: str) -> bool:
-            # read the per-direction flags from the compiled material table
-            entry = matTable.entries[name]
-            return bool(entry["inwards"].flags & MaterialFlags.PORTAL) and bool(
-                entry["outwards"].flags & MaterialFlags.PORTAL
-            )
-
-        # portals per scene + per-scene context count (uniform across its portals).
-        # A portal is identified by portalLinks; enforce links <-> PORTAL flag so a
-        # PORTAL-flagged surface without links (or vice versa) is caught early.
-        portalsPerScene: list[list] = []
-        contextCount: list[int] = []
-        for sid, sc in enumerate(scenes):
-            portals = []
-            for inst in sc.instances:
-                hasLinks = inst.portalLinks is not None
-                hasFlag = _hasPortalFlag(inst.material)
-                if hasLinks != hasFlag:
-                    raise ValueError(
-                        f"Inconsistent portal in scene {sid}: instance material "
-                        f"{inst.material!r} "
-                        + (
-                            "has setPortalLinks but its material lacks the PORTAL "
-                            "flag on both sides"
-                            if hasLinks
-                            else "carries the PORTAL flag but has no setPortalLinks"
-                        )
-                        + " - a portal needs both."
-                    )
-                if hasLinks:
-                    portals.append(inst)
-            portalsPerScene.append(portals)
-            lens = {len(p.portalLinks) for p in portals}
-            if len(lens) > 1:
-                raise ValueError(
-                    f"Portals in scene {sid} declare differing context counts "
-                    f"{sorted(lens)}; every portal must define a transition for "
-                    "every context of its scene."
-                )
-            contextCount.append(lens.pop() if portals else 0)
-        if sum(len(p) for p in portalsPerScene) == 0:
-            raise ValueError(
-                "Sub-scenes given but no portals defined (use "
-                "MeshStore.createPortal + MeshInstance.setPortalLinks)."
-            )
-        if len(portalsPerScene[0]) == 0:
-            raise ValueError(
-                "The main scene defines no portals (use MeshStore.createPortal)."
-            )
-
-        # validate every link (target existence, mesh key, range, rigid net map)
-        eye3 = np.eye(3)
-        for sid, portals in enumerate(portalsPerScene):
-            for p in portals:
-                Lsrc = p.transform.numpy()[:, :3]
-                try:
-                    LsrcInv = np.linalg.inv(Lsrc)
-                except np.linalg.LinAlgError:
-                    raise ValueError(
-                        f"A portal transform in scene {sid} is singular."
-                    )
-                for ctx, (arrival, nextId) in enumerate(p.portalLinks):
-                    if id(arrival) not in loc:
-                        raise ValueError(
-                            f"Portal link in scene {sid} (context {ctx}) targets an "
-                            "instance that is not part of the main scene or any "
-                            "sub-scene."
-                        )
-                    if arrival.portalLinks is None:
-                        raise ValueError(
-                            f"Portal link in scene {sid} (context {ctx}) targets a "
-                            "non-portal instance (it has no setPortalLinks)."
-                        )
-                    dstScene, _ = loc[id(arrival)]
-                    if not (0 <= int(nextId) < contextCount[dstScene]):
-                        raise ValueError(
-                            f"Portal link in scene {sid} (context {ctx}) targets "
-                            f"context {nextId} of scene {dstScene}, which has "
-                            f"{contextCount[dstScene]} context(s)."
-                        )
-                    if p.portalMeshKey != arrival.portalMeshKey:
-                        raise ValueError(
-                            f"Linked portal boxes must share the same mesh "
-                            f"({p.portalMeshKey!r} -> {arrival.portalMeshKey!r})."
-                        )
-                    Larr = arrival.transform.numpy()[:, :3]
-                    Mlin = Larr @ LsrcInv
-                    if not np.allclose(Mlin @ Mlin.T, eye3, atol=1e-4):
-                        raise ValueError(
-                            f"Portal link in scene {sid} (context {ctx}) has a "
-                            "non-rigid net map: source and arrival box scales "
-                            "differ. Linked boxes must have matching scale."
-                        )
-
-    def _buildPortalTables(self, scene: Scene) -> None:
-        """
-        Build the SSBOs read by portal.glsl:
-          - SubTlasTable / SubObjectIdTable: sub-scene TLAS / ObjectIdMap device
-            addresses, indexed by (sceneId - 1) (main excluded);
-          - PortalIndexTable / TransitionTable: per-scene (indexed by sceneId,
-            main at 0) device addresses of the gl_InstanceID -> portal-index map
-            and the flattened transition table (14 uint words per record:
-            nextScene, nextInstanceId, then a mat4x3 as 12 column-major floats);
-          - PortalMetaTable: per-scene portal count (transition-table row stride).
-        """
-        self._validatePortals(scene)
-        scenes = self._portalScenes(scene)
-        loc = self._portalInstanceLocations(scenes)
-
-        # sub-scene addresses, indexed by (sceneId - 1)
-        subTlas = np.array(
-            [self._splitAddr(s.tlas.address) for s in self._subScenes],
-            dtype=np.uint32,
-        ).reshape(-1)
-        subObjId = np.array(
-            [self._splitAddr(s.objectIdMapTensor.address) for s in self._subScenes],
-            dtype=np.uint32,
-        ).reshape(-1)
-
-        keep: list = []  # keep the per-scene tensors alive (their addresses are used)
-        portalIndexAdr: list = []
-        transAdr: list = []
-        portalCounts: list[int] = []
-        for sc in scenes:
-            insts = sc.instances
-            idxMap = np.full(len(insts), -1, dtype=np.int32)
-            portals = []
-            for iid, inst in enumerate(insts):
-                if inst.portalLinks is not None:
-                    idxMap[iid] = len(portals)
-                    portals.append(inst)
-            P = len(portals)
-            portalCounts.append(P)
-            idxT = hp.Tensor(np.ascontiguousarray(idxMap))
-            keep.append(idxT)
-            portalIndexAdr.append(self._splitAddr(idxT.address))
-
-            # transition table: rows = contexts, cols = P, 14 uint words per record
-            C = len(portals[0].portalLinks) if P > 0 else 0
-            records = np.zeros((max(C * P, 1), 14), dtype=np.uint32)
-            for p_idx, p in enumerate(portals):
-                for ctx, (arrival, nextId) in enumerate(p.portalLinks):
-                    dstScene, _ = loc[id(arrival)]
-                    A = arrival.transform.numpy()  # (3,4) float32
-                    T = np.ascontiguousarray(A.T, dtype=np.float32).reshape(-1)
-                    r = ctx * P + p_idx
-                    records[r, 0] = np.uint32(dstScene)
-                    records[r, 1] = np.uint32(int(nextId))
-                    records[r, 2:14] = T.view(np.uint32)
-            transT = hp.Tensor(np.ascontiguousarray(records.reshape(-1)))
-            keep.append(transT)
-            transAdr.append(self._splitAddr(transT.address))
-
-        self._portalKeepAlive = keep
-        self._portalTensors = {
-            "SubTlasTable": hp.Tensor(np.ascontiguousarray(subTlas)),
-            "SubObjectIdTable": hp.Tensor(np.ascontiguousarray(subObjId)),
-            "PortalIndexTable": hp.Tensor(
-                np.ascontiguousarray(np.array(portalIndexAdr, dtype=np.uint32).reshape(-1))
-            ),
-            "TransitionTable": hp.Tensor(
-                np.ascontiguousarray(np.array(transAdr, dtype=np.uint32).reshape(-1))
-            ),
-            "PortalMetaTable": hp.Tensor(
-                np.ascontiguousarray(np.array(portalCounts, dtype=np.int32))
-            ),
-        }
-
-    def _bindPortalTables(self, program) -> None:
-        if self._subScenes:
-            program.bindParams(**self._portalTensors)
 
     @Tracer.batchSize.setter
     def batchSize(self, value) -> None:
@@ -2352,7 +2344,7 @@ class _SceneTargetTracer(Tracer):
         return self._directLightingDisabled
 
     @property
-    def scene(self) -> Scene:
+    def scene(self) -> SceneBase:
         """Scene the tracer propagates rays in"""
         return self._scene
 
@@ -2470,12 +2462,23 @@ class _SceneTargetTracer(Tracer):
         # some stages may be None -> remove them
         return [s for s in stages if s[1] is not None]
 
+    @property
+    def waveState(self) -> _WaveState | None:
+        """
+        State of the wavefront tracer, or `None` if the trace loop runs in a
+        single dispatch. See `WavefrontSceneForwardTracer`.
+        """
+        return self._wave
+
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
             stage.bindParams(self._pipeline, i)
+        offset = _SceneTargetTracer.TraceParams._batchSize.offset
+        if self._wave is not None:
+            tensor = self._getParamsTensor("TraceParams", i)
+            return self._wave.run(self._pipeline, self._sbt, tensor, offset)
         if self._dispatchIndirect:
             tensor = self._getParamsTensor("TraceParams", i)
-            offset = _SceneTargetTracer.TraceParams._batchSize.offset
             return [
                 self._pipeline.traceRaysIndirect(tensor, offset=offset, **self._sbt)
             ]
@@ -2546,10 +2549,15 @@ class SceneForwardTracer(_SceneTargetTracer):
             This should only be done when necessary and with caution.
     rayOffsetOrigin: float | None, default=None
         Optional override for the absolute self-intersection offset applied to 
-        coordinates with (`|coordinate| < 1/32`). `None` keeps the shader default
+        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
         (`1/65536`). 
-    
-        See also `rayOffsetScale`.
+    rayOffsetThreshold: float | None, default=None
+        Optional override for the `|coordinate|` at which the self-intersection
+        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
+        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
+        coordinates to the ULP branch, which scales with the coordinate, and thus
+        allows a much smaller absolute offset without it becoming a no-op just
+        below the threshold - one ULP there is `threshold * 2^-23`.
     """
 
     name = "Scene Forward Tracer"
@@ -2573,7 +2581,9 @@ class SceneForwardTracer(_SceneTargetTracer):
         disableDirectLighting: bool = False,
         rayOffsetScale: float | None = None,
         rayOffsetOrigin: float | None = None,
+        rayOffsetThreshold: float | None = None,
     ) -> None:
+        _requireSingleScene(scene, "SceneForwardTracer")
         super().__init__(
             batchSize,
             ray,
@@ -2592,6 +2602,7 @@ class SceneForwardTracer(_SceneTargetTracer):
             disableDirectLighting=disableDirectLighting,
             rayOffsetScale=rayOffsetScale,
             rayOffsetOrigin=rayOffsetOrigin,
+            rayOffsetThreshold=rayOffsetThreshold,
         )
         self._lightSource = source
 
@@ -2608,22 +2619,86 @@ class MultiSceneForwardTracer(_SceneTargetTracer):
     fine geometry (e.g. thin fibers) placed far from the world origin, where
     single-precision world coordinates lose resolution.
 
-    Identical to `SceneForwardTracer` plus a `subScenes` argument. Define portals
-    with `MeshStore.createPortal` (which assigns the built-in `PORTAL_MATERIAL`):
-    each main-scene portal box carries a `target` sub-scene id (1-based) and its
-    rigid world transform; each sub-scene contains the same box at identity plus
-    the fine geometry. The main scene and every sub-scene MUST share one
-    `MaterialStore`, which MUST contain `PORTAL_MATERIAL`.
+    Identical to `SceneForwardTracer`, except that it takes a `MultiScene`
+    instead of a `Scene`. The scene owns the whole portal setup - placing the
+    boxes, linking them and uploading the lookup tables - so this tracer merely
+    enables the corresponding shader path.
+
+    A sub-scene reached through several portal contexts is built ONCE, so its
+    detectors cannot be told apart by a single `objectId`. Pass a sequence to
+    `detectorId` (see `MeshStore.createInstance`) to assign one id per context;
+    a scalar id is broadcast to all of them. Only this tracer evaluates the
+    per-context ids. Note that `targetId` filters on the resolved id and thus
+    selects a single context once the ids differ.
 
     Note: next-event estimation (`targetGuide`) is not yet supported together
     with sub-scenes.
 
     Parameters
     ----------
-    Same as `SceneForwardTracer`, plus:
-    subScenes: Sequence[Scene]
-        Sub-scenes referenced by the portals; a portal `target` selects
-        `subScenes[target - 1]`.
+    batchSize: int
+        Number of rays to simulate per run. Note that a single run may generate
+            up to twice `maxPathLength` hits.
+    ray: RayModel
+        Model of the ray to propagate.
+    source: LightSource
+        Source producing light rays
+    response: HitResponse
+        Response function simulating the detector
+    rng: RNG
+        Generator for creating random numbers
+    scene: Scene
+        Scene in which the rays are traced
+    capacity: int | None, default=None
+        Maximum batch size. If None, same as `batchSize`.
+    callback: TraceEventCallback, default=EmptyEventCallback()
+        Callback called for each tracing event. See `TraceEventCallback`.
+    maxPathLength: int, default=64
+        Maximum length of paths to simulate
+    targetId: int | None, default=None
+        Optionally limits responses to a single target id. Hits on other objects
+        even if they have the detector flag will be ignored.
+    sampleCoefficient: float, default=NaN
+        Optional coefficient used for sampling ray lengths. If the value is NaN
+        or negative, the volume will sample the ray length instead. Will always
+        be disabled, if the ray is a particle.
+    maxTime: float, default=inf
+        Rays exceeding this limit will aborted with code `decayed`.
+    disableDirectLighting: bool, default=False
+        Whether to ignore contributions from direct lighting, i.e. paths with
+        no scattering. Usefull if a dedicated tracer or estimator for direct
+        light contributions is additionally used.
+    rayOffsetScale: float | None, default=None
+        Optional override for the self-intersection offset applied to coordinates
+        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
+        (`256.0`).
+        
+        Upon hitting a surface the ray is offset towards the new volume to avoid
+        self-intersection due to numerical inaccuracies. The default value is
+        known to be a robust safeguard against self-intersection, but it is very
+        conservative. For thin volumes choosing a smaller offset might improve
+        the quality of the simulation.
+        
+        !!! warning
+        
+            Decreasing this value might introduce self-intersection artifacts.
+            This should only be done when necessary and with caution.
+    rayOffsetOrigin: float | None, default=None
+        Optional override for the absolute self-intersection offset applied to 
+        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
+        (`1/65536`). 
+    rayOffsetThreshold: float | None, default=None
+        Optional override for the `|coordinate|` at which the self-intersection
+        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
+        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
+        coordinates to the ULP branch, which scales with the coordinate, and thus
+        allows a much smaller absolute offset without it becoming a no-op just
+        below the threshold - one ULP there is `threshold * 2^-23`.
+
+    See Also
+    --------
+    theia.scene.MultiScene: builds and owns the portal geometry
+    theia.scene.linkPortals: connects the portal boxes
     """
 
     name = "Multi-Scene Forward Tracer"
@@ -2635,8 +2710,7 @@ class MultiSceneForwardTracer(_SceneTargetTracer):
         source: LightSource,
         response: HitResponse,
         rng: RNG,
-        scene: Scene,
-        subScenes: Sequence[Scene],
+        scene: MultiScene,
         *,
         capacity: int | None = None,
         callback: TraceEventCallback = EmptyEventCallback(),
@@ -2644,10 +2718,191 @@ class MultiSceneForwardTracer(_SceneTargetTracer):
         targetId: int | None = None,
         sampleCoefficient: float = float("NaN"),
         maxTime: float = float("inf"),
-        targetGuide: TargetGuide | None = None,
         disableDirectLighting: bool = False,
         rayOffsetScale: float | None = None,
         rayOffsetOrigin: float | None = None,
+        rayOffsetThreshold: float | None = None,
+    ) -> None:
+        if not isinstance(scene, MultiScene):
+            raise ValueError(
+                "MultiSceneForwardTracer expects a MultiScene; use "
+                "SceneForwardTracer for a single Scene."
+            )
+        super().__init__(
+            batchSize,
+            ray,
+            source,
+            response,
+            rng,
+            scene,
+            capacity=capacity,
+            callback=callback,
+            lamSource=None,  # provided by light source
+            maxPathLength=maxPathLength,
+            targetId=targetId,
+            sampleCoefficient=sampleCoefficient,
+            maxTime=maxTime,
+            targetGuide=None, # not supported
+            disableDirectLighting=disableDirectLighting,
+            rayOffsetScale=rayOffsetScale,
+            rayOffsetOrigin=rayOffsetOrigin,
+            rayOffsetThreshold=rayOffsetThreshold,
+        )
+        self._lightSource = source
+
+    @property
+    def source(self) -> LightSource:
+        """Source producing rays"""
+        return self._lightSource
+
+    @property
+    def scene(self) -> MultiScene:
+        """Scene the tracer propagates rays in"""
+        return self._scene  # type: ignore[return-value]
+
+
+
+DEFAULT_WAVE_SCHEDULE = (1,) * 32
+"""
+Default number of trace iterations per wave of `WavefrontSceneForwardTracer`:
+compact after each of the first 32 iterations, then trace whatever is left in a
+single wave (the tracer always extends the schedule to cover `maxPathLength`).
+
+Deliberately simple, since the schedule that pays off depends on how the path
+lengths of a workload are distributed - the early iterations are where the bulk
+of the paths dies in most setups, which is what this covers. Workloads with a
+long tail of surviving paths do better with waves that grow towards the end;
+see `WavefrontSceneForwardTracer` for how to measure that with `waveCounts()`.
+"""
+
+
+class WavefrontSceneForwardTracer(_SceneTargetTracer):
+    """
+    Forward scene tracer that splits the trace loop over several dispatches
+    ("waves"), compacting the paths that are still alive in between.
+
+    Identical results to `SceneForwardTracer` / `MultiSceneForwardTracer` - it
+    accepts both a `Scene` and a `MultiScene` - but it does not leave a warp
+    waiting for its longest-lived lane. After each wave the surviving paths are
+    appended to a queue via an atomic counter, and the next wave is dispatched
+    with exactly that many rays (`traceRaysIndirect` reads the counter from
+    device memory), so its warps are filled with long-lived paths only.
+
+    Paths keep their id (`idx`) across waves, so both the random numbers they
+    draw and the id a response is attributed to are unaffected by the compaction.
+
+    When this pays off
+    ------------------
+    Two conditions have to hold, and the second one is easy to miss:
+
+    1. Path lengths vary strongly across a batch, e.g. a small fraction of the
+       photons is guided in fibers and sees hundreds of surface interactions
+       while the rest is absorbed after a few.
+    2. `batchSize` has to be considerably larger than the number of warps the
+       device can keep resident (streaming multiprocessors times warps per
+       multiprocessor). Below that every warp of a batch is resident from the
+       start, idle lanes cost no instruction issue, and compacting only adds
+       dispatch and queue overhead.
+
+    Measured on a fiber setup (mean path length 30, max ~1500) on a device
+    holding ~2300 warps, tracing the same batch with the same results:
+
+    ======================  ==========  ==========  =======
+    paths per batch          warps       megakernel  speedup
+    ======================  ==========  ==========  =======
+    42k                      1.3k        33 ms       0.69x
+    167k                     5.2k        109 ms      1.37x
+    332k                     10.4k       209 ms      1.88x
+    666k                     20.8k       412 ms      3.03x
+    ======================  ==========  ==========  =======
+
+    So use it for large batches, and keep the single dispatch tracers for small
+    ones.
+
+    Parameters
+    ----------
+    batchSize: int
+        Number of rays to simulate per run. Note that a single run may generate
+        up to twice `maxPathLength` hits.
+    ray: RayModel
+        Model of the ray to propagate.
+    source: LightSource
+        Source producing light rays
+    response: HitResponse
+        Response function simulating the detector
+    rng: RNG
+        Generator for creating random numbers
+    scene: Scene | MultiScene
+        Scene in which the rays are traced
+    capacity: int | None, default=None
+        Maximum batch size. If None, same as `batchSize`.
+    callback: TraceEventCallback, default=EmptyEventCallback()
+        Callback called for each tracing event. See `TraceEventCallback`.
+    maxPathLength: int, default=64
+        Maximum length of paths to simulate
+    targetId: int | None, default=None
+        Optionally limits responses to a single target id. Hits on other objects
+        even if they have the detector flag will be ignored.
+    sampleCoefficient: float, default=NaN
+        Optional coefficient used for sampling ray lengths. If the value is NaN
+        or negative, the volume will sample the ray length instead. Will always
+        be disabled, if the ray is a particle.
+    maxTime: float, default=inf
+        Max total time including delay from the source and travel time, after
+        which a ray gets stopped
+    disableDirectLighting: bool, default=False
+        Whether to ignore contributions from direct lighting, i.e. light paths
+        with no scattering.
+    waveSchedule: int[], default=DEFAULT_WAVE_SCHEDULE
+        Number of trace iterations each dispatch performs. Entries are clipped so
+        that the total never exceeds `maxPathLength`, and a final wave covering
+        the remainder is appended if needed - the traced path length is therefore
+        the same as for the other tracers, regardless of the schedule.
+    rayOffsetScale: float | None, default=None
+        Override for the self-intersection offset applied to coordinates at or
+        above `rayOffsetThreshold`, in ULP. `None` keeps the shader default.
+    rayOffsetOrigin: float | None, default=None
+        Override for the absolute self-intersection offset applied to coordinates
+        below `rayOffsetThreshold`. `None` keeps the shader default.
+    rayOffsetThreshold: float | None, default=None
+        Override for the `|coordinate|` at which the self-intersection offset
+        switches from the absolute `rayOffsetOrigin` to `rayOffsetScale` ULP.
+        `None` keeps the shader default.
+
+    Note
+    ----
+    Next event estimation (`targetGuide`) is not supported. The device must
+    support indirect dispatch, i.e. `getEnabledRayTracingFeatures()
+    .indirectDispatch` must be `True`.
+
+    See Also
+    --------
+    theia.trace.SceneForwardTracer: single dispatch per batch
+    theia.trace.MultiSceneForwardTracer: single dispatch, sub-scenes via portals
+    """
+
+    name = "Wavefront Scene Forward Tracer"
+
+    def __init__(
+        self,
+        batchSize: int,
+        ray: RayModel,
+        source: LightSource,
+        response: HitResponse,
+        rng: RNG,
+        scene: SceneBase,
+        *,
+        capacity: int | None = None,
+        callback: TraceEventCallback = EmptyEventCallback(),
+        maxPathLength: int = 64,
+        targetId: int | None = None,
+        sampleCoefficient: float = float("NaN"),
+        maxTime: float = float("inf"),
+        disableDirectLighting: bool = False,
+        waveSchedule: Sequence[int] = [1] * 32,
+        rayOffsetScale: float | None = None,
+        rayOffsetOrigin: float | None = None,
+        rayOffsetThreshold: float | None = None,
     ) -> None:
         super().__init__(
             batchSize,
@@ -2663,11 +2918,12 @@ class MultiSceneForwardTracer(_SceneTargetTracer):
             targetId=targetId,
             sampleCoefficient=sampleCoefficient,
             maxTime=maxTime,
-            targetGuide=targetGuide,
+            targetGuide=None,  # not supported
             disableDirectLighting=disableDirectLighting,
             rayOffsetScale=rayOffsetScale,
             rayOffsetOrigin=rayOffsetOrigin,
-            subScenes=subScenes,
+            rayOffsetThreshold=rayOffsetThreshold,
+            waveSchedule=waveSchedule,
         )
         self._lightSource = source
 
@@ -2677,9 +2933,24 @@ class MultiSceneForwardTracer(_SceneTargetTracer):
         return self._lightSource
 
     @property
-    def subScenes(self) -> list[Scene]:
-        """Sub-scenes reachable through portals."""
-        return self._subScenes
+    def waveSchedule(self) -> list[int]:
+        """Number of trace iterations each dispatch performs"""
+        assert self._wave is not None
+        return self._wave.schedule
+
+    def waveCounts(self) -> list[int]:
+        """
+        Number of paths each wave AFTER the first was launched with in the batch
+        that ran last, i.e. how many paths survived each wave. Useful for
+        checking how well the schedule matches the actual path lengths.
+
+        Retrieves the counters from the device and thus must not be called while
+        a batch is still in flight. Note that the counters are reset at the start
+        of every batch, so this describes the last batch only - which may well be
+        a small or even empty remainder.
+        """
+        assert self._wave is not None
+        return self._wave.counts()
 
 
 class SceneBackwardTargetTracer(_SceneTargetTracer):
@@ -2747,8 +3018,15 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
             This should only be done when necessary and with caution.
     rayOffsetOrigin: float | None, default=None
         Optional override for the absolute self-intersection offset applied to 
-        coordinates with (`|coordinate| < 1/32`). `None` keeps the shader default
+        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
         (`1/65536`). 
+    rayOffsetThreshold: float | None, default=None
+        Optional override for the `|coordinate|` at which the self-intersection
+        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
+        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
+        coordinates to the ULP branch, which scales with the coordinate, and thus
+        allows a much smaller absolute offset without it becoming a no-op just
+        below the threshold - one ULP there is `threshold * 2^-23`.
         
         See also `rayOffsetScale`.
     """
@@ -2775,7 +3053,9 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         disableDirectLighting: bool = False,
         rayOffsetScale: float | None = None,
         rayOffsetOrigin: float | None = None,
+        rayOffsetThreshold: float | None = None,
     ) -> None:
+        _requireSingleScene(scene, "SceneBackwardTargetTracer")
         super().__init__(
             batchSize,
             ray,
@@ -2794,6 +3074,7 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
             disableDirectLighting=disableDirectLighting,
             rayOffsetScale=rayOffsetScale,
             rayOffsetOrigin=rayOffsetOrigin,
+            rayOffsetThreshold=rayOffsetThreshold,
         )
         self._camera = camera
         self._photons = wavelengthSource

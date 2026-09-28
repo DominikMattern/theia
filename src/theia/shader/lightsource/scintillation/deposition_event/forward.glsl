@@ -3,6 +3,9 @@
 
 #include "math.glsl"
 #include "util/sample.glsl"
+//SPEED_OF_LIGHT and lookUpMediaTable1D for the Cherenkov cone; guarded, so a
+//second include costs nothing
+#include "material.glsl"
 #include "lightsource/scintillation/deposition_event/common.glsl"
 
 ForwardRay sampleLight(uint idx, inout uint dim) {
@@ -55,12 +58,38 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
                 + length(position - lightParams.startPosition[batchIdx])
                 / max((lightParams.startVelocity[batchIdx] + u * (lightParams.endVelocity[batchIdx] - lightParams.startVelocity[batchIdx]) / 2), 1e-5);
 
-    //sample direction
-    vec3 direction = sampleUnitSphere(random2D(idx, dim));
+    //sample direction and emission time
+    vec3 direction;
+    float total_time;
+    #ifdef LIGHT_SOURCE_CHERENKOV
+    if (lightParams.mode[batchIdx] != 0u) {
+        //Cherenkov: a cone about the segment direction with cos(theta) = 1/(beta*n).
+        //beta is the mean over the step, as in G4Cerenkov, and the wavelength
+        //source drew this segment's wavelength from the same beta - so the two
+        //agree up to float32 rounding, which the max() below absorbs. Landing on
+        //a wavelength just past the threshold is asymptotically forward emission
+        //anyway, since sin(theta) vanishes there.
+        float beta = 0.5 * (lightParams.startVelocity[batchIdx]
+                          + lightParams.endVelocity[batchIdx]) / SPEED_OF_LIGHT;
+        float n = lookUpMediaTable1D(
+            REFRACTIVE_INDEX, lightParams.mediumIdx[batchIdx], wavelength, 1.0);
+        float cos_theta = 1.0 / max(beta * n, 1.0);
+        float phi = TWO_PI * random(idx, dim);
+        vec3 trackDir = normalize(lightParams.endPosition[batchIdx]
+                                - lightParams.startPosition[batchIdx]);
+        direction = createLocalCOSY(trackDir) * sphericalToCartessian(phi, cos_theta);
+        //prompt: there is no decay to wait for
+        total_time = time;
+    }
+    else
+    #endif
+    {
+        direction = sampleUnitSphere(random2D(idx, dim));
 
-    //sample scintillation time delay from exponential decay
-    float v = random(idx, dim);
-    float total_time = time - log(1.0 - v) * lightParams.timeConstant[batchIdx];
+        //sample scintillation time delay from exponential decay
+        float v = random(idx, dim);
+        total_time = time - log(1.0 - v) * lightParams.timeConstant[batchIdx];
+    }
 
     //calculate contribution
     #ifndef LIGHT_SOURCE_EMIT_PARTICLE

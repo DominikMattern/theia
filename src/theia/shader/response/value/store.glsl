@@ -20,7 +20,18 @@ void response(const HitItem item, uint idx, inout uint dim) {
 
     #ifdef RESPONSE_STORE_OBJECT_ID
     IntBuffer ints = IntBuffer(queueAdr);
-    ints.values[i] = item.objectId;
+    ints.values[i] = item.objectId; i += responseParams.queueSize;
+    #endif
+
+    #ifdef RESPONSE_STORE_WAVELENGTH
+    floats.values[i] = item.wavelength; i += responseParams.queueSize;
+    #endif
+
+    #ifdef RESPONSE_STORE_PATH_ID
+    //EXPERIMENT: the id of the path that produced this hit, i.e. the handle the
+    //host needs to attribute the hit back to whatever created the path
+    UIntBuffer uints = UIntBuffer(queueAdr);
+    uints.values[i] = idx;
     #endif
 }
 

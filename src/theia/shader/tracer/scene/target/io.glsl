@@ -10,6 +10,11 @@ uniform TraceParams {
 
 struct TraceData{
     TRACE_RAY ray;
+    //Id of the photon/path, i.e. the RNG stream and the handle used to attribute
+    //a response back to what created it. This is NOT gl_LaunchIDEXT.x: a
+    //wavefront tracer relaunches surviving paths at a different launch index
+    //(see WavefrontSceneForwardTracer), so the id has to travel with the ray.
+    uint idx;
     uint dim;
     ResultCode result;
 };

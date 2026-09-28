@@ -24,23 +24,21 @@
  * ForwardRay/TRACE_RAY (ray.glsl), MATERIAL_PORTAL_BIT (material.glsl); and on
  * gl_InstanceID being valid (closest-hit stage). It only compiles under RAY_PORTAL.
  *
- * Table indexing (built host-side, see trace.py): PortalIndexTable / TransitionTable
+ * Table indexing (built host-side, see scene.py): PortalIndexTable / TransitionTable
  * / PortalMetaTable are indexed by sceneId (0-based, main INCLUDED at index 0).
  */
 
 #include "util/offset.glsl"
 #include "util/buffers.glsl"
+#include "tracer/scene/portal/meta.glsl"
 
 //Per scene (indexed by sceneId, main at 0): device address of an int[] mapping
 //gl_InstanceID -> compact portal index within that scene (-1 if not a portal).
 readonly buffer PortalIndexTable { uvec2 portalIndexAdr[]; };
 //Per scene (indexed by sceneId): device address of a uint[] transition table,
 //14 words per record: [0]=nextScene, [1]=nextInstanceId, [2..13]=T (mat4x3,
-//column-major, 12 floats). Record index = instanceId * portalCount + portalIdx.
+//column-major, 12 floats). Record index = instanceId * sceneMeta[].x + portalIdx.
 readonly buffer TransitionTable { uvec2 transAdr[]; };
-//Per scene (indexed by sceneId): number of portal boxes, i.e. the row stride of
-//the transition table.
-readonly buffer PortalMetaTable { int portalCount[]; };
 
 //Stride of one transition record, in uint words.
 const uint PORTAL_TRANSITION_STRIDE = 14u;
@@ -55,7 +53,7 @@ struct PortalTransition {
 //Look up the transition for a portal hit in the photon's current frame.
 PortalTransition lookupTransition(int sceneId, int instanceId, int glInstanceID) {
     int portalIdx = IntBuffer(portalIndexAdr[sceneId]).values[glInstanceID];
-    int stride = portalCount[sceneId];
+    int stride = sceneMeta[sceneId].x;
     uint base = uint(instanceId * stride + portalIdx) * PORTAL_TRANSITION_STRIDE;
     UIntBuffer tb = UIntBuffer(transAdr[sceneId]);
 
