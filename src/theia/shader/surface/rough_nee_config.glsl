@@ -5,7 +5,7 @@
 Decides whether a rough surface model compiles its NEE parts, and does so *before*
 the micro-facet model is included - which is why this is a header of its own
 rather than a few lines in the templates. The models need it too: everything they
-provide only for NEE, such as `eval_microfacet_density`, hangs off it, and so do
+provide only for NEE, such as `evalMicrofacetDensity`, hangs off it, and so do
 the material properties feeding those (see api.glsl in microfacet_models/).
 
 NEE is unavailable when

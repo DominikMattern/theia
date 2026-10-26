@@ -18,18 +18,9 @@ invertible proposal times a bounded acceptance weight:
 
 The Rayleigh factor is sampled analytically, truncated to [0, pi/2] so the
 proposal never leaves the domain, and accepted with probability sin(theta)/theta,
-which is <= 1 on [0, pi/2]. The overall acceptance rate is >= 0.81 for any sigma,
-so the loop almost always exits on the first iteration.
+which is <= 1 on [0, pi/2]. The overall acceptance rate is >= 0.81 for any sigma.
 */
 
-/*
-Micro-facet parameters that are constant across a single surface interaction,
-i.e. do not depend on the sampled facet. They are computed once via
-prepare_microfacet() and then passed into sample_microfacet_normal() and
-microfacet_accept_prob() on every retry, so the loop-invariant roughness load, the
-Rayleigh truncation mass and the tangent basis are not recomputed per iteration
-of the rejection loop.
-*/
 struct MicrofacetParams {
     float sigma;
     float c;        //truncation mass of the Rayleigh proposal on [0, pi/2]
@@ -37,7 +28,7 @@ struct MicrofacetParams {
     vec3 tangent2;
 };
 
-MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
+MicrofacetParams prepareMicrofacet(vec3 rayDir, const SurfaceHit hit){
     MicrofacetParams params;
     params.sigma = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
     params.c = 1.0 - exp(-(PI_OVER_TWO * PI_OVER_TWO) / (2.0 * params.sigma * params.sigma));
@@ -46,7 +37,12 @@ MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
     return params;
 }
 
-vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
+vec3 sampleMicrofacetNormal(
+    const MicrofacetParams params,
+    vec3 rayDir,
+    const SurfaceHit hit,
+    uint idx, inout uint dim
+) {
 
     //rejection sample theta from the truncated Rayleigh proposal; accept ~ sin(theta)/theta.
     //4 attempts give a fall-through probability < 1.3e-3 even in the worst case (sigma -> inf),
@@ -63,11 +59,13 @@ vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const 
     float phi = TWO_PI * random(idx, dim);
 
     //rotate surface normal
-    return cos(theta) * hit.rayNrm + sin(theta) * cos(phi) * params.tangent1 + sin(theta) * sin(phi) * params.tangent2;
+    return cos(theta) * hit.rayNrm
+        + sin(theta) * cos(phi) * params.tangent1
+        + sin(theta) * sin(phi) * params.tangent2;
 }
 
 #ifdef ROUGH_SURFACE_NEE
-//Deterministic twin of sample_microfacet_normal(): the density with which it
+//Deterministic twin of sampleMicrofacetNormal(): the density with which it
 //draws `microfacetNormal`, measured in solid angle (normalized to one over the
 //upper hemisphere). Sampling theta with p(theta) ~ sin(theta)*exp(-theta^2/2sigma^2)
 //and phi uniformly cancels the sin(theta) of the solid angle measure:
@@ -76,7 +74,12 @@ vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const 
 //
 //Z_sigma = int_0^(pi/2) sin(t)*exp(-t^2/2sigma^2) dt has no closed form and is
 //computed on the host from `roughness_parameter` (see theia.microfacet).
-float eval_microfacet_density(const MicrofacetParams params, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+float evalMicrofacetDensity(
+    const MicrofacetParams params,
+    vec3 microfacetNormal,
+    const SurfaceHit hit,
+    vec3 rayDir
+) {
     float cos_h = dot(microfacetNormal, hit.rayNrm);
     if (cos_h <= 0.0) return 0.0;
     float theta = acos(min(cos_h, 1.0));
@@ -85,9 +88,14 @@ float eval_microfacet_density(const MicrofacetParams params, vec3 microfacetNorm
 }
 #endif
 
-//Probability that this facet is accepted for the given outgoing direction.
-//The caller turns it into a decision by comparing against a single uniform.
-float microfacet_accept_prob(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+float microfacetAcceptProb(
+    const MicrofacetParams params,
+    vec3 dirOut,
+    vec3 microfacetNormal,
+    const SurfaceHit hit,
+    vec3 rayDir
+) {
+    //only acccept facets that are hit from the front
     return dot(rayDir, microfacetNormal) < 0.0 ? 1.0 : 0.0;
 }
 

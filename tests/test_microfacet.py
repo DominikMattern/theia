@@ -2,7 +2,7 @@
 Independent reference for the micro-facet normalization tables.
 
 theia builds those tables on the device from the surface model's own functions
-(`eval_microfacet_density` and `roughFacetAcceptance`), so the shipped code
+(`evalMicrofacetDensity` and `roughFacetAcceptance`), so the shipped code
 contains the facet density and the acceptance criteria exactly once - a table can
 therefore not drift away from the sampling it normalizes.
 

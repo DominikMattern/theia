@@ -4,9 +4,9 @@
 
 /*
 Shared implementation of all rough metal surface models. The only model-specific
-parts are `sample_microfacet_normal`,
-`eval_microfacet_density` and `microfacet_accept_prob`, which are provided by one
-of the files in `microfacet_models/`.
+parts are `prepareMicrofacet`, `sampleMicrofacetNormal`, `microfacetAcceptProb`
+and, for NEE/MIS, `evalMicrofacetDensity`, which are provided by one of the files
+in `microfacet_models/` (see api.glsl there).
 
 Metals never transmit; the non-reflected fraction is absorbed. The surface is a
 pure specular lobe on micro-facets and supports NEE/MIS. The Geant4 UNIFIED
@@ -63,7 +63,7 @@ float roughChannel(
 ) {
     dir = reflect(rayDir, microfacetNormal);
     return dot(dir, hit.rayNrm) > 0.0
-        ? microfacet_accept_prob(mfParams, dir, microfacetNormal, hit, rayDir)
+        ? microfacetAcceptProb(mfParams, dir, microfacetNormal, hit, rayDir)
         : 0.0;
 }
 
@@ -132,7 +132,7 @@ SurfaceProperties prepareSurface(
 
     //compute the facet-independent micro-facet parameters once (roughness,
     //tangent basis, ...) and reuse them across all retries
-    MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
+    MicrofacetParams mfParams = prepareMicrofacet(ray.direction, hit);
 
     //Sample micro-facets until one is accepted; in most cases the first one is.
     //The extra iteration is the fall-back after 20 failed attempts: an unrotated
@@ -141,7 +141,7 @@ SurfaceProperties prepareSurface(
         bool last = (i == 20);
         vec3 microfacetNormal = hit.rayNrm;
         if (!last)
-            microfacetNormal = sample_microfacet_normal(mfParams, ray.direction, hit, idx, dim);
+            microfacetNormal = sampleMicrofacetNormal(mfParams, ray.direction, hit, idx, dim);
 
         //reflectance at this facet
         float cos_i = abs(dot(ray.direction, microfacetNormal));

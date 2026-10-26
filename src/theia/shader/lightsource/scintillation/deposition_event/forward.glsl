@@ -21,7 +21,23 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
     //select batch element
 
     #if defined(LIGHT_SOURCE_EMIT_PARTICLE) || defined(LIGHT_SOURCE_DETERMINISTIC_RAYS)
-    
+
+    //Safeguard: paths beyond the ones the elements own would be attributed to
+    //the last element, as the batch size set on the host is not checked against
+    //the counts. Reject them instead (zero direction).
+    if (idx >= lightParams.cumulativeCount[EVENTS_PER_BATCH - 1]) {
+        return createForwardRay(
+            vec3(0.0),
+            vec3(0.0),
+            wavelength,
+            lightParams.mediumIdx[EVENTS_PER_BATCH - 1],
+            0.0
+            #ifndef LIGHT_SOURCE_EMIT_PARTICLE
+            , 0.0
+            #endif
+        );
+    }
+
     int batchIdx = findBatchElement(idx);
 
     #elif EVENTS_PER_BATCH > 1
@@ -63,12 +79,7 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
     float total_time;
     #ifdef LIGHT_SOURCE_CHERENKOV
     if (lightParams.mode[batchIdx] != 0u) {
-        //Cherenkov: a cone about the segment direction with cos(theta) = 1/(beta*n).
-        //beta is the mean over the step, as in G4Cerenkov, and the wavelength
-        //source drew this segment's wavelength from the same beta - so the two
-        //agree up to float32 rounding, which the max() below absorbs. Landing on
-        //a wavelength just past the threshold is asymptotically forward emission
-        //anyway, since sin(theta) vanishes there.
+        //Cherenkov: a cone about the segment direction with cos(theta) = 1/(beta*n)
         float beta = 0.5 * (lightParams.startVelocity[batchIdx]
                           + lightParams.endVelocity[batchIdx]) / SPEED_OF_LIGHT;
         float n = lookUpMediaTable1D(

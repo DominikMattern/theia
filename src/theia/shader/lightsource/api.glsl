@@ -11,6 +11,8 @@
 /**
  * Samples a new light ray from the source.
  *
+ * A light source may reject a sample by returning a ray with a zero direction. 
+ *
  * Required for forward tracing.
 */
 ForwardRay sampleLight(

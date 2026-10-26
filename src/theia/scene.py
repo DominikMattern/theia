@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from theia.material import MaterialFlags, MaterialStore, VACUUM_IDX
+from theia.material import MaterialFlags, MaterialStore
 import theia.units as u
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -474,21 +474,11 @@ class MeshInstance:
         self._bbox = self.localBBox.transform(self.transform)
         self.material = material
         self.objectId = objectId
-        # Whether this instance is a portal box (set by MeshStore.createPortal).
-        # Note that this is independent of whether it has been linked yet.
         self.isPortal: bool = False
-        # Mesh key of a portal box (set by MeshStore.createPortal), else None.
-        # Used to check that linked portal boxes are the same mesh.
         self.portalMeshKey: str | None = None
-        # Number of portal contexts of the scene this instance belongs to. Only
-        # meaningful for portals; see MeshStore.createPortal.
         self.contextCount: int = 1
-        # Portal transitions indexed by the CURRENT context the photon carries;
-        # entry `i` is `(arrivalInstance, nextContext)` meaning a photon
-        # crossing this box in context `i` is placed at `arrivalInstance`
-        # (whose scene and transform define the target frame) carrying context
-        # `nextContext`. ``None`` marks a context that has not been linked
-        # yet.
+        # Portal transitions `(arrivalInstance, nextContext)` indexed by the CURRENT 
+        # context the photon carries
         self.portalLinks: list[tuple["MeshInstance", int] | None] = []
 
     @property
@@ -549,14 +539,9 @@ class MeshInstance:
     @property
     def objectIds(self) -> list[int]:
         """
-        Object ids indexed by the portal context (`instanceId`) the photon
+        Object ids indexed by the portal context the photon
         carries, always as a list. A scalar `objectId` yields a single element
-        and is broadcast to all contexts by the `MultiSceneForwardTracer`.
-
-        Assigning one id per context is only meaningful for a sub-scene shared
-        by several portal contexts: its geometry is built once, so a scalar id
-        cannot tell the placements apart. The list length must match the
-        context count of the scene the instance belongs to.
+        and is broadcast to all contexts by the tracer.
         """
         if isinstance(self._objectId, list):
             return list(self._objectId)
@@ -631,7 +616,7 @@ class MeshStore:
             Id of the instance if used as a detector/target. A sequence assigns
             one id per portal context of the scene the instance is placed in,
             allowing the placements of a shared sub-scene to be told apart. Only
-            the `MultiSceneForwardTracer` evaluates the per-context ids; every
+            a tracer given a `MultiScene` evaluates the per-context ids; every
             other tracer uses the first one.
         scale: float | None, default=None
             Dimension of the vertex positions. Defaults to 1m.
@@ -679,31 +664,27 @@ class MeshStore:
         TRANSMITTED ray switches to the arrival portal's scene/frame
         (reflected rays stay); see `MultiScene`.
 
-        The material is mandatory and must carry `MaterialFlags.PORTAL` on both
-        sides. Any surface model works, so a portal can be a real optical
-        boundary, e.g. a `DielectricSurface` with flags `"PRT"` (= PORTAL +
-        reflect + transmit). For a portal that should be physically inert, use a
-        `BorderSurface` with the SAME medium on both sides and flags `"P*"`.
+        The material must carry the portal flag `"P"`. Any surface model can be 
+        used. For a portal that should be physically inert, use a `BorderSurface` 
+        with the SAME medium on both sides and flags `"P*"`.
 
         Parameters
         ----------
         key: str
-            Name of the (bounding-box) mesh as given to the MeshStore.
+            Name of the mesh as specified during init of store
         material: str
-            Name of the portal material to assign; must carry the PORTAL flag on
-            both sides and be present in the scene's `MaterialStore`.
+            Name of the assigned material. The actual material will get resolved
+            during compilation of the scene. The material must carry the portal 
+            flag `"P"`.
         transform: Transform | None, default=None
-            Placement of the box in its scene. May include scale (uniform or
-            non-uniform) to size a unit mesh to the true physical box/ellipsoid;
-            linked boxes must have matching scale (see `MultiScene`).
+            The transformation to apply on the instance.
+            If None, identity transformation is applied.
         contextCount: int, default=1
             Number of portal contexts of the scene this box will be placed in,
-            i.e. how often that scene is entered through a portal. All portals of
-            one scene must agree on it; `MultiScene` verifies that. Declaring it
-            here lets `linkPortals` range-check the contexts right away.
+            i.e. how often that scene is entered through a portal. Must be the same
+            for all portals of one scene.
         scale: float | None, default=None
-            Vertex unit shorthand, forwarded to `createInstance` (defaults to 1 m);
-            folds into the instance transform just like `transform`.
+            Dimension of the vertex positions. Defaults to 1m.
         """
         if contextCount < 1:
             raise ValueError("contextCount must be at least 1!")
@@ -719,16 +700,13 @@ def linkPortals(
     a: MeshInstance,
     b: MeshInstance,
     contexts: Iterable[tuple[int, int]],
-    *,
-    bidirectional: bool = True,
 ) -> None:
     """
     Connects two portals so photons crossing one continue at the other.
 
     `contexts` lists `(contextA, contextB)` pairs: a photon crossing `a` while
-    carrying context `contextA` arrives at `b` carrying `contextB`, and -
-    unless `bidirectional` is `False` - vice versa. Contexts of an instance may
-    be linked in several calls; `MultiScene` rejects any that are left unset.
+    carrying context `contextA` arrives at `b` carrying `contextB`, and vice
+    versa. Contexts of an instance may be linked in several calls.
 
     Parameters
     ----------
@@ -737,11 +715,6 @@ def linkPortals(
         They must be instances of the same mesh.
     contexts: Iterable[(int, int)]
         Context pairs to connect, see above.
-    bidirectional: bool, default=True
-        Whether to also link `b` back to `a`. The portal graph is directed, so a
-        one-way edge is legitimate: pass `False` when the reverse direction of
-        `b` already leads somewhere else, e.g. when several boxes funnel back
-        into a single shared one.
     """
     for inst, name in ((a, "a"), (b, "b")):
         if not inst.isPortal:
@@ -755,28 +728,27 @@ def linkPortals(
         )
 
     pairs = [(int(ctxA), int(ctxB)) for ctxA, ctxB in contexts]
+    # validate everything before linking anything
+    claimed: set[tuple[int, int]] = set()
     for ctxA, ctxB in pairs:
-        for inst, ctx, name in ((a, ctxA, "a"), (b, ctxB, "b")):
+        slots = [(a, ctxA, "a"), (b, ctxB, "b")]
+        if a is b and ctxA == ctxB:
+            slots = slots[:1]  # a context linked to itself claims one slot
+        for inst, ctx, name in slots:
             if not 0 <= ctx < inst.contextCount:
                 raise ValueError(
                     f"Context {ctx} is out of range for portal {name}, which "
                     f"declares {inst.contextCount} context(s)."
                 )
-        if a.portalLinks[ctxA] is not None:
-            raise ValueError(
-                f"Context {ctxA} of portal a is already linked; revisit the "
-                "transition graph instead of overwriting it."
-            )
-        if bidirectional and b.portalLinks[ctxB] is not None:
-            raise ValueError(
-                f"Context {ctxB} of portal b is already linked. Pass "
-                "bidirectional=False if only the a -> b direction is meant."
-            )
+            if inst.portalLinks[ctx] is not None or (id(inst), ctx) in claimed:
+                raise ValueError(
+                    f"Context {ctx} of portal {name} is already linked."
+                )
+            claimed.add((id(inst), ctx))
 
     for ctxA, ctxB in pairs:
         a.portalLinks[ctxA] = (b, ctxB)
-        if bidirectional:
-            b.portalLinks[ctxB] = (a, ctxA)
+        b.portalLinks[ctxB] = (a, ctxA)
 
 
 class SceneBase:
@@ -858,7 +830,7 @@ class SceneBase:
 
     @property
     def tlas(self) -> hp.AccelerationStructure:
-        """Acceleration structure rays are traced against at the start of their path"""
+        """The acceleration structure describing the scene's geometry"""
         raise NotImplementedError
 
     def bindParams(self, program: hp.Program | hp.RayTracingPipeline) -> None:
@@ -953,7 +925,7 @@ class MultiScene(SceneBase):
 
     See Also
     --------
-    theia.trace.MultiSceneForwardTracer: the tracer consuming this
+    theia.trace.SceneForwardTracer: traces a MultiScene
     """
 
     def __init__(
@@ -1036,6 +1008,8 @@ class MultiScene(SceneBase):
           - all portals within a scene declare the same number of contexts,
           - every context of every portal is linked, and targets a portal with a
             matching mesh key (a closed, total transition graph),
+          - every link is bidirectional, i.e. crossing the arrival portal back
+            returns to the source portal and context,
           - the net cross-portal map M = T_arrival . T_source^-1 is a rigid
             isometry (matched scale on both boxes),
           - per-context detector ids match the context count of their scene.
@@ -1092,8 +1066,7 @@ class MultiScene(SceneBase):
         for sid, portals in enumerate(portalsPerScene[1:], start=1):
             if len(portals) == 0:
                 raise ValueError(
-                    f"Sub-scene {sid} defines no portals, so a photon entering "
-                    "it could never leave."
+                    f"Sub-scene {sid} defines no portals."
                 )
 
         # validate every link: fully linked, target exists, mesh key, rigid map
@@ -1109,8 +1082,7 @@ class MultiScene(SceneBase):
                     if link is None:
                         raise ValueError(
                             f"Context {ctx} of a portal in scene {sid} is not "
-                            "linked. Every context needs a transition, else a "
-                            "photon crossing it would be lost (use linkPortals)."
+                            "linked. Every context needs a transition."
                         )
                     arrival, nextCtx = link
                     if id(arrival) not in self._loc:
@@ -1129,6 +1101,14 @@ class MultiScene(SceneBase):
                         raise ValueError(
                             f"Linked portal boxes must share the same mesh "
                             f"({p.portalMeshKey!r} -> {arrival.portalMeshKey!r})."
+                        )
+                    back = arrival.portalLinks[nextCtx]
+                    if back is None or back[0] is not p or back[1] != ctx:
+                        raise ValueError(
+                            f"Portal link in scene {sid} (context {ctx}) is "
+                            "one-way: crossing the arrival portal back does not "
+                            "return to it. Links must be bidirectional (use "
+                            "linkPortals instead of editing portalLinks)."
                         )
                     Larr = arrival.transform.numpy()[:, :3]
                     Mlin = Larr @ LsrcInv
@@ -1160,46 +1140,40 @@ class MultiScene(SceneBase):
         Builds the SSBOs read by portal.glsl:
           - SubTlasTable: sub-scene TLAS device addresses, indexed by
             (sceneId - 1) (world excluded, it uses params.tlas);
-          - PortalIndexTable / TransitionTable / ObjectIdTable: per-scene
-            (indexed by sceneId, world at 0) device addresses of the
-            gl_InstanceID -> portal-index map, the flattened transition table
+          - TransitionTable / ObjectIdTable: per-scene (indexed by sceneId,
+            world at 0) device addresses of the flattened transition table
             (14 uint words per record: nextScene, nextContext, then a mat4x3 as
-            12 column-major floats) and the per-context detector ids;
-          - PortalMetaTable: per-scene (portal count, instance count), i.e. the
-            row strides of the transition and objectId tables.
+            12 column-major floats) and the per-context detector ids. Both are
+            [context][instance] tables addressed by gl_InstanceID directly;
+            non-portal instances hold a zero transition record;
+          - InstanceCountTable: per-scene instance count, i.e. the row stride of
+            these tables.
         """
         subTlas = np.array(
             [self._splitAddr(t.address) for t in self.subTlas], dtype=np.uint32
         ).reshape(-1)
 
         keep: list = []  # keep the per-scene tensors alive (their addresses are used)
-        portalIndexAdr: list = []
         transAdr: list = []
         objIdAdr: list = []
-        sceneMeta: list[tuple[int, int]] = []
+        instanceCount: list[int] = []
         for sid, insts in enumerate(self._scenes):
-            idxMap = np.full(len(insts), -1, dtype=np.int32)
-            portals: list[MeshInstance] = []
-            for iid, inst in enumerate(insts):
-                if inst.isPortal:
-                    idxMap[iid] = len(portals)
-                    portals.append(inst)
-            nPortals = len(portals)
-            idxT = hp.Tensor(np.ascontiguousarray(idxMap))
-            keep.append(idxT)
-            portalIndexAdr.append(self._splitAddr(idxT.address))
-
-            # transition table: rows = contexts, cols = portals, 14 words each
+            # transition table: rows = contexts, cols = instances, 14 words
+            # each. Spending a record on every instance instead of only on the
+            # portals avoids a dependent gl_InstanceID -> portal index lookup.
             nCtx = self._contextCount[sid]
-            records = np.zeros((max(nCtx * nPortals, 1), 14), dtype=np.uint32)
-            for pIdx, p in enumerate(portals):
+            nInst = len(insts)
+            records = np.zeros((max(nCtx * nInst, 1), 14), dtype=np.uint32)
+            for iid, p in enumerate(insts):
+                if not p.isPortal:
+                    continue
                 for ctx, link in enumerate(p.portalLinks):
                     assert link is not None  # guaranteed by _validatePortals
                     arrival, nextCtx = link
                     dstScene, _ = self._loc[id(arrival)]
                     A = arrival.transform.numpy()  # (3,4) float32
                     T = np.ascontiguousarray(A.T, dtype=np.float32).reshape(-1)
-                    r = ctx * nPortals + pIdx
+                    r = ctx * nInst + iid
                     records[r, 0] = np.uint32(dstScene)
                     records[r, 1] = np.uint32(nextCtx)
                     records[r, 2:14] = T.view(np.uint32)
@@ -1209,14 +1183,14 @@ class MultiScene(SceneBase):
 
             # objectId table: rows = contexts, cols = instances. Scalar ids get
             # broadcast over all contexts.
-            objIds = np.empty((max(nCtx, 1), len(insts)), dtype=np.int32)
+            objIds = np.empty((max(nCtx, 1), nInst), dtype=np.int32)
             for iid, inst in enumerate(insts):
                 objIds[:, iid] = inst.objectIds  # broadcasts a single id
             objT = hp.Tensor(np.ascontiguousarray(objIds.reshape(-1)))
             keep.append(objT)
             objIdAdr.append(self._splitAddr(objT.address))
 
-            sceneMeta.append((nPortals, len(insts)))
+            instanceCount.append(nInst)
 
         toTensor = lambda rows, dtype: hp.Tensor(
             np.ascontiguousarray(np.array(rows, dtype=dtype).reshape(-1))
@@ -1224,10 +1198,9 @@ class MultiScene(SceneBase):
         self._keepAlive = keep
         self._tensors = {
             "SubTlasTable": hp.Tensor(np.ascontiguousarray(subTlas)),
-            "PortalIndexTable": toTensor(portalIndexAdr, np.uint32),
             "TransitionTable": toTensor(transAdr, np.uint32),
             "ObjectIdTable": toTensor(objIdAdr, np.uint32),
-            "PortalMetaTable": toTensor(sceneMeta, np.int32),
+            "InstanceCountTable": toTensor(instanceCount, np.uint32),
         }
 
 

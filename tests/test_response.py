@@ -7,8 +7,15 @@ import theia.lookup
 import theia.response
 import theia.units as u
 
+from theia.device import getEnabledRayTracingFeatures, isRayTracingEnabled
+from theia.light import ConstWavelengthSource, VoxelLightSource
+from theia.material import Material, MaterialStore
+from theia.model import DispersionFreeMedium
 from theia.random import PhiloxRNG
 from theia.ray import UnpolarizedRay
+from theia.scene import MeshStore, Scene, Transform
+from theia.surface import AbsorbingSurface, BorderSurface
+import theia.trace
 
 from hephaistos.pipeline import runPipeline, runPipelineStage
 
@@ -395,3 +402,78 @@ def test_IntegratingHitResponse(rng, integrateAll: bool, useDouble: bool):
         )
     results = response.result(0)
     assert np.allclose(results, exp)
+
+
+@pytest.mark.parametrize("storeSquares", [True, False])
+@pytest.mark.parametrize("useDouble", [True, False])
+@pytest.mark.parametrize("useBinIndex", [True, False])
+@pytest.mark.parametrize("integrateAll", [True, False])
+def test_BatchedIntegratingHitResponse(
+    rng, storeSquares: bool, useDouble: bool, useBinIndex: bool, integrateAll: bool
+):
+    N = 64 * 1024
+    cellsPerBatch = 1000
+    detCount = None if integrateAll else 3
+    # cells own a varying number of paths; the last paths belong to no cell
+    count = rng.integers(0, 120, cellsPerBatch)
+    assert count.sum() < N
+    if useBinIndex:
+        # several cells share a bin; some cells map outside the range
+        binCount = 300
+        binIndex = rng.integers(0, binCount + 20, cellsPerBatch)
+    else:
+        # last cells map outside the range
+        binCount = cellsPerBatch - 5
+        binIndex = None
+
+    ray = UnpolarizedRay()
+    value = theia.response.UniformValueResponse()
+    response = theia.response.BatchedIntegratingHitResponse(
+        value,
+        cellsPerBatch,
+        count=count,
+        binIndex=binIndex,
+        binCount=binCount,
+        detectorCount=detCount,
+        storeSquares=storeSquares,
+        useDoublePrecision=useDouble,
+    )
+    # the replay passes the index of the hit in the queue as path id
+    replay = theia.response.HitReplay(N, ray, response)
+
+    samples = replay.queue.view(0)
+    samples.count = N
+    samples["contrib"] = 2.0 * rng.random((N,)) + 0.5
+    # include invalid detector ids, which must be ignored
+    samples["objectId"] = rng.integers(-1, detCount + 1, N)
+
+    runPipeline(replay.collectStages())
+
+    # calculate expected result
+    idx = np.arange(N)
+    cell = np.searchsorted(np.cumsum(count), idx, side="right")
+    mask = cell < cellsPerBatch
+    bin = np.full(N, binCount)
+    bin[mask] = cell[mask] if binIndex is None else binIndex[cell[mask]]
+    mask &= bin < binCount
+    objId = samples["objectId"]
+    contrib = samples["contrib"].astype(np.float64)
+    if integrateAll:
+        shape = (binCount,)
+        target = (bin[mask],)
+    else:
+        mask &= (objId >= 0) & (objId < detCount)
+        shape = (binCount, detCount)
+        target = (bin[mask], objId[mask])
+    exp = np.zeros(shape)
+    np.add.at(exp, target, contrib[mask])
+    exp2 = np.zeros(shape)
+    np.add.at(exp2, target, contrib[mask] ** 2)
+
+    assert response.result(0).shape == shape
+    assert np.allclose(response.result(0), exp)
+    if storeSquares:
+        assert np.allclose(response.squares(0), exp2)
+    else:
+        with pytest.raises(RuntimeError):
+            response.squares(0)

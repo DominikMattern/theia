@@ -13,8 +13,8 @@ import theia.light
 import theia.units as u
 from theia.compiler import compileShader
 from theia.lookup import uploadTables
-from theia.material import MaterialStore, VACUUM_IDX
-from theia.model import PureWaterModel
+from theia.material import Material, MaterialStore, VACUUM_IDX
+from theia.model import DispersionFreeMedium, PureWaterModel
 from theia.random import PhiloxRNG
 from theia.ray import UnpolarizedRay
 from theia.scintillation import ScintillationDepositionEventSource
@@ -447,6 +447,66 @@ def test_SphericalLightSource_bwd():
     exp_contrib = budget / (4.0 * np.pi * d**2)
     # bit larger error, likely precission issues (float vs double)
     assert np.allclose(result["contrib"], exp_contrib, atol=1e-5)
+
+
+@pytest.mark.parametrize("particle", [True, False], ids=["particle", "ray"])
+def test_VoxelLightSource_fwd(particle: bool):
+    raysPerCell = 1024
+    nCells = 32
+    N = raysPerCell * nCells
+    lower = (-1.0, 2.0, 0.5) * u.m
+    upper = (3.0, 5.0, 3.0) * u.m
+    gridShape = (4, 3, 5)
+    cellOffset = 7
+    timeRange = (10.0, 50.0) * u.ns
+    budget = 12.0
+
+    # create pipeline
+    ray = UnpolarizedRay(particle=particle)
+    philox = PhiloxRNG(key=0xC0110FFC0FFEE)
+    photons = theia.light.ConstWavelengthSource(wavelength=100.0 * u.nm)
+    light = theia.light.VoxelLightSource(
+        photons,
+        mediumIdx=VACUUM_IDX,
+        lower=lower,
+        upper=upper,
+        gridShape=gridShape,
+        raysPerCell=raysPerCell,
+        cellOffset=cellOffset,
+        timeRange=timeRange,
+        budget=budget,
+        emitParticles=particle,
+    )
+    assert light.cellCount == 60
+    sampler = theia.light.LightSampler(N, light, ray, rng=philox)
+    # run
+    runPipeline(sampler.collectStages())
+    result = sampler.queue.view(0)
+
+    # check result
+    assert result.count == N
+    assert np.allclose(np.sqrt(np.square(result["direction"]).sum(-1)), 1.0)
+    assert np.all(result["mediumIdx"] == VACUUM_IDX)
+    t_min, t_max = np.min(result["time"]).item(), np.max(result["time"]).item()
+    assert timeRange[0] <= t_min <= timeRange[0] + 0.1
+    assert timeRange[1] - 0.1 <= t_max <= timeRange[1]
+    if not particle:
+        assert np.allclose(result["contrib"], budget)
+    # uniform direction should average to zero
+    assert np.abs(np.mean(result["direction"], axis=0)).max() < 0.012
+
+    # check each ray lies within its cell
+    lower, upper = np.array(lower), np.array(upper)
+    cellSize = (upper - lower) / np.array(gridShape)
+    local = (result["position"] - lower) / cellSize
+    ijk = np.floor(local).astype(np.int64)
+    cell = np.ravel_multi_index(tuple(ijk.T), gridShape)
+    expCell = cellOffset + np.arange(N) // raysPerCell
+    assert np.all(cell == expCell)
+    # positions are uniform inside cells
+    frac = (local - ijk).reshape(nCells, raysPerCell, 3)
+    assert np.abs(frac.mean(1) - 0.5).max() < 5.0 * np.sqrt(1 / 12 / raysPerCell)
+    assert stats.kstest(frac.ravel(), "uniform").pvalue > 1e-3
 
 
 @pytest.mark.parametrize("particle", [True, False], ids=["particle", "ray"])

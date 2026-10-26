@@ -81,9 +81,9 @@ def _scintillation_components(medium: Medium, particleCode: int):
     each of them into a segment of its own, so the properties travel with the
     segment instead of selecting which batch it lands in.
 
-    Components are taken in order until their branching ratios add up to one, so a
-    medium defining a single component is as valid as one defining three. Running
-    out of components before reaching one warns and drops the remaining light.
+    Components are taken in order until their branching ratios add up to one. 
+    Running out of components before reaching one warns and drops the remaining
+    light.
 
     Property names
     --------------
@@ -103,7 +103,7 @@ def _scintillation_components(medium: Medium, particleCode: int):
 
     The ``_ion`` entries are only consulted for nuclear codes
     (``code > 1000000000``, i.e. alphas, deuterons and heavy nuclei), which share
-    one fallback because they have no single PDG code.
+    one fallback.
 
     Two keys are special. ``yield`` takes no component: it is the total number of
     photons per deposited energy, which the branching ratios then split up.
@@ -169,32 +169,12 @@ def _cherenkov_charges(
 
     A code listed in `charges` is given that charge. Anything not listed falls back 
     on the PDG convention: `DEFAULT_CHERENKOV_CHARGES` for the named particles and
-    the PDG ion charge for ions.
-
-    Careful with that ion charge: Z out of the code is the charge of a **fully
-    stripped** nucleus, not its actual ionisation state. That is deliberate, not
-    an oversight - it is what `G4Cerenkov` uses, which reads
-    `aParticle->GetDefinition()->GetPDGCharge()` (G4Cerenkov.cc:254), and an ion
-    definition is created with `charge = Z * eplus` (G4IonTable.cc:293). Geant4
-    models no charge state for Cherenkov either, so matching it keeps a
-    comparison against it honest. Where the real state matters - a partially
-    stripped heavy ion - name the code in `charges`.
-
-    In practice the assumption rarely bites: a nucleus slow enough to have kept
-    its electrons is far below the threshold anyway. The fastest recoil in a
-    LEGEND K-42 run reaches beta = 5.1e-5 (51 eV), while radiating in argon
-    would take beta > 0.53, i.e. 6.9 GeV.
-
-    The yield goes with z**2, while the threshold ``beta * n > 1`` does not
-    depend on the charge at all.
+    the PDG ion charge for ions. Careful with that ion charge: Z out of the code is 
+    the charge of a **fully stripped** nucleus, not its actual ionisation state.
     """
     
     #: Electric charge in units of e, by absolute PDG code. A particle missing here
-    #: and not recognised as a nucleus is taken to be neutral and radiates nothing -
-    #: which is what has to happen for the neutrals: a gamma steps through a
-    #: scintillator at beta ~ 1 and would otherwise be handed the full Frank-Tamm
-    #: yield over its (long) flight path. In a LEGEND argon run gammas carry 87 % of
-    #: the summed step length but 0.01 % of the energy.
+    #: and not recognised as a nucleus is taken to be neutral and radiates nothing.
     DEFAULT_CHERENKOV_CHARGES: Final[dict[int, float]] = {
         11: 1.0,     # e
         13: 1.0,     # mu
@@ -278,15 +258,8 @@ def buildCherenkovTables(
         if tables is None:
             continue
         ppf, yieldGrid, betaMin = tables
-        # lookUp2D maps and clamps both axes itself, so the ranges travel with
-        # the table. uploadTables cannot be used here: it fixes every axis to
-        # [0,1].
         medium.properties[CHERENKOV_SPECTRUM_PROPERTY] = TableProperty(
             Table(ppf, (betaMin, 1.0), (0.0, 1.0)))
-        # The producer only ever reads this one back on the host - the shader
-        # gets the photon number through `expectedPhotonNumber`. It is a table
-        # property anyway because that is what carries its own axis range, which
-        # is where the threshold comes from when it is read back.
         medium.properties[CHERENKOV_YIELD_PROPERTY] = TableProperty(
             Table(yieldGrid, (betaMin, 1.0)))
         radiating.append(medium)
@@ -327,8 +300,7 @@ def _integrate_cherenkov_emission(
 
     # 2D percent point function, rows are beta, columns the quantile.
     # The bottom row sits exactly at the threshold and is degenerate (all
-    # photons at lam_min); interpolating against it is what makes the support
-    # shrink smoothly as beta approaches the threshold.
+    # photons at lam_min).
     nodes = np.linspace(betaMin, 1.0, betaNodes)
     dens = density(nodes)
     # `initial=0` supplies the value at lam[0] - the integral over an empty
@@ -383,11 +355,8 @@ def _read_cherenkov_emission(medium: Medium) -> _CherenkovEmission | None:
             "zero, i.e. they were never uploaded; call 'buildCherenkovTables' "
             "on the media *before* handing them to the MaterialStore")
     # The beta axis of the yield curve is where the threshold - and with it the
-    # largest refractive index - comes from; a Table keeps its ranges in double
-    # precision, so this is the exact value the tables were built for.
+    # largest refractive index - comes from.
     betaMin, betaMax = yieldProp.table.axisRanges[0]
-    # A Table stores its samples as float32. The yield is good to a per mille at
-    # best, so the lost digits sit far below the physics.
     yieldGrid = np.asarray(yieldProp.table.samples, np.float64)
     betaGrid = np.linspace(betaMin, betaMax, len(yieldGrid))
     return _CherenkovEmission(betaGrid, yieldGrid, int(sampler.data),
@@ -567,9 +536,6 @@ def _resolve_pair_properties(pairs: _PairIndex, scintillationCache: dict,
 def _warn_missing_cherenkov_tables(medium: Medium) -> None:
     """
     Warns about a medium that could radiate but was never given its tables.
-
-    Without them the medium simply emits no Cherenkov light, which is silent
-    enough to be worth a word - unlike a medium that cannot radiate anyway.
     """
     prop = medium.properties.get("refractive_index")
     table = getattr(prop, "table", None)
@@ -723,6 +689,28 @@ def _compute_cherenkov_photons(steps: np.ndarray, pairs: _PairIndex,
     return photons
 
 
+#: Expected photon number up to which a scintillation segment draws its photon
+#: number from a Poisson rather than a Gaussian.
+SCINTILLATION_POISSON_THRESHOLD: Final[float] = 10.0
+
+
+def _draw_scintillation_counts(mean: np.ndarray, resolutionScale: np.ndarray,
+                               uniform: np.ndarray) -> np.ndarray:
+    """
+    The scintillation photon numbers, one per entry of `uniform`.
+
+    Gaussian with `resolutionScale` widening it, but - like Geant4 - Poisson
+    below `SCINTILLATION_POISSON_THRESHOLD`: there the Gaussian would round
+    small means away or reach below zero, and clipping it biases the photon
+    number up. Both invert the same uniform, so it stays one draw per segment.
+    """
+    count = np.rint(mean + np.sqrt(mean) * resolutionScale * ndtri(uniform))
+    small = mean <= SCINTILLATION_POISSON_THRESHOLD
+    # see the Cherenkov draw for why `pdtrik` is rounded up
+    count[small] = np.ceil(pdtrik(uniform[small], mean[small]))
+    return count
+
+
 def _draw_photon_counts(expectedPhotons: np.ndarray, slots: _SlotTables,
                         pairOfSegment: np.ndarray, slotOfSegment: np.ndarray,
                         isCherenkov: np.ndarray, numCherenkov: int,
@@ -730,10 +718,11 @@ def _draw_photon_counts(expectedPhotons: np.ndarray, slots: _SlotTables,
     """
     Draws the photon number of every segment around its expected value.
 
-    Gaussian for scintillation, to incorporate the resolution scale, Poisson for
-    Cherenkov. One draw per segment, taken here rather than per task so that
-    segment k always gets draw k of the run: `random` consumes exactly one 64 bit
-    word per value, so the stream is position addressable and the photon numbers
+    Gaussian for scintillation, to incorporate the resolution scale, switching to
+    Poisson for small means, and Poisson for Cherenkov. One draw per segment,
+    taken here rather than per task so that segment k always gets draw k of the
+    run: `random` consumes exactly one 64 bit word per value, so the stream is
+    position addressable and the photon numbers
     do not depend on how `events` is chunked nor on `eventsPerBatch`. The
     scintillation stream is consumed only by scintillation segments, so
     scintillation segment k still gets draw k whether or not Cherenkov is
@@ -746,16 +735,14 @@ def _draw_photon_counts(expectedPhotons: np.ndarray, slots: _SlotTables,
         # every segment is a scintillation one, so the draws line up with the
         # segments and none of the masking below is needed
         resolutionScale = slots.resolutionScale[pairOfSegment, slotOfSegment]
-        return np.rint(expectedPhotons
-                       + np.sqrt(expectedPhotons) * resolutionScale
-                       * ndtri(uniform))
+        return _draw_scintillation_counts(expectedPhotons, resolutionScale,
+                                          uniform)
     pathCount = np.empty(numSegments)
     isScint = ~isCherenkov
-    mean = expectedPhotons[isScint]
     resolutionScale = slots.resolutionScale[pairOfSegment[isScint],
                                             slotOfSegment[isScint]]
-    pathCount[isScint] = np.rint(
-        mean + np.sqrt(mean) * resolutionScale * ndtri(uniform))
+    pathCount[isScint] = _draw_scintillation_counts(
+        expectedPhotons[isScint], resolutionScale, uniform)
     # `pdtrik` inverts the Poisson CDF *continuously*, so it has to be rounded
     # up to land on the discrete quantile min{k : P(K <= k) >= u}.
     uCherenkov = np.maximum(cherenkovRng.random(numCherenkov), 5e-324)
@@ -793,8 +780,7 @@ def _expand_segments(chunk, matStore, scintillationCache, cherenkovCache, rng, *
 
     Everything is whole array work. The component set of a step follows from its
     (medium, particle code) pair alone, so the properties are resolved once per
-    pair rather than once per step, and the expansion itself is one `np.repeat`
-    plus one gather per column.
+    pair rather than once per step.
 
     Returns a `_Segments` holding all columns, or `None` if the chunk contributes
     no light at all.
@@ -892,17 +878,11 @@ def _iter_scintillation_tasks(events, matStore, *, eventsPerBatch, padIncomplete
 
     Emits tasks strictly in input order: the deposition steps of a chunk are
     expanded into segments (`_expand_segments`), appended to a single stream, and
-    cut into batches of `eventsPerBatch`. A segment's properties travel with it,
-    so one batch may mix scintillation components, particle types and media - the
-    price for having the hits of an event land next to each other in the output.
+    cut into batches of `eventsPerBatch`.
 
     A complete batch is a contiguous *view* into the expanded arrays; only the
     one batch straddling a chunk boundary is ever copied.
     """
-    # Reject a ray mode that could not attribute its paths to a segment. Rays
-    # need a fixed count per segment, since tasks in input order require the
-    # segment of a path to follow from its index - which importance sampling one
-    # segment per ray cannot provide.
     if emitParticles:
         if raysPerPhoton is not None:
             raise ValueError("'raysPerPhoton' is for rays; particles always get "
@@ -910,9 +890,7 @@ def _iter_scintillation_tasks(events, matStore, *, eventsPerBatch, padIncomplete
     else:
         if raysPerPhoton is None:
             raise ValueError(
-                "rays need 'raysPerPhoton': tasks in input order require the "
-                "segment of a path to follow from its index, which importance "
-                "sampling one segment per ray cannot provide")
+                "rays need 'raysPerPhoton.")
         if not raysPerPhoton > 0.0:
             raise ValueError(
                 f"'raysPerPhoton' must be positive, got {raysPerPhoton}")
@@ -1023,11 +1001,8 @@ def createTasksFromEvents(events: Iterable[EnergyDepositionEvents],
     must be defined for all scintillating media through their medium properties
     (see `material.OpticalProperties` for the property names).
 
-    Tasks are emitted **in input order**: batch k holds segments
-    k*eventsPerBatch .. (k+1)*eventsPerBatch-1 of the stream that results from
-    walking `events` and splitting every deposition step into one segment per 
-    scintillation component. All segments of a step, and hence of an event, are 
-    therefore adjacent.
+    Tasks are emitted **in input order**. All segments of a step, and hence of an
+    event, are therefore adjacent.
 
     Parameters
     ----------
@@ -1115,9 +1090,7 @@ def iterTasksFromEvents(events: Iterable[EnergyDepositionEvents],
     the batching compared to processing everything at once.
 
     This enables overlapping event reading / task building with GPU work and keeps
-    host memory bounded. The trade-off is that `maxBatchSize` is not known up
-    front, so the tracer capacity must be fixed a priori (each yielded task still
-    carries its own `_batchSize`).
+    host memory bounded.
 
     Parameters
     ----------
@@ -1607,27 +1580,12 @@ class ScintillationCherenkovDepositionEventSource(ScintillationDepositionEventSo
     Segments carry one extra column, `mode`, telling the shader which kind of
     light a segment stands for: scintillation emits isotropically and delayed by
     the component's time constant, Cherenkov emits promptly onto a cone about the
-    segment direction with ``cos(theta) = 1 / (beta * n(lambda))``. Everything
-    else - the position along the segment, the emission time - goes through the
-    machinery that was already there, because both kinds of light describe how
-    much they emit through the same `expectedPhotonNumber`.
-
-    Beta is recomputed in the shader as the mean of `startVelocity` and
-    `endVelocity`, which is the convention `G4Cerenkov` uses, so the velocities
-    keep their true values and the emission time along the segment stays exact.
-
-    Run `buildCherenkovTables` on the media before they go into their
-    `MaterialStore` - that is where the emission comes from - build the tasks
-    with `createCombinedTasksFromEvents` or `iterCombinedTasksFromEvents`, and
-    pair this source with a `BatchedSpectrumWavelengthSource` constructed with
-    `axisValue`: the Cherenkov spectrum depends on beta and is therefore sampled
-    from a 2D table, while the scintillation components keep their 1D ones.
+    segment direction with ``cos(theta) = 1 / (beta * n(lambda))``.
 
     Parameters
     ----------
     mode: int | Iterable[int], default=0
-        Per segment, 0 for scintillation and 1 for Cherenkov. The task builder
-        fills this in; the default leaves every segment scintillating.
+        Per segment, 0 for scintillation and 1 for Cherenkov. 
     *args, **kwargs
         As `ScintillationDepositionEventSource`.
 
@@ -1662,13 +1620,5 @@ class ScintillationCherenkovDepositionEventSource(ScintillationDepositionEventSo
     def backwardSourceCode(self) -> str | None:
         """
         `None`: backward tracing is not supported here.
-
-        Sampling backwards means solving for the point on the segment whose
-        emission reaches a given observer. For isotropic scintillation any point
-        does, so the base class simply picks one; Cherenkov light leaves on a
-        cone and only one point on the segment can reach the observer at all,
-        which needs the geometric solution in
-        `shader/lightsource/cherenkov/track/backward.glsl` rather than the
-        isotropic one.
         """
         return None

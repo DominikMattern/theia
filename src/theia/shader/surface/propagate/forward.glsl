@@ -4,10 +4,9 @@
 #include "util/offset.glsl"
 
 #ifdef RAY_PORTAL
-//Portal transition tables + portalReframe(). Included BEFORE the surface model so
-//the transmit paths below can switch scene on a portal crossing. Self-contained;
-//only compiles under RAY_PORTAL (forward MultiSceneForwardTracer).
-#include "tracer/scene/portal/transition.glsl"
+//Portal tables + portalChangeFrame(). Included BEFORE the surface model so the
+//transmit paths below can switch scene on a portal crossing.
+#include "tracer/scene/portal.glsl"
 #endif
 
 /**
@@ -18,20 +17,15 @@ ResultCode crossBorder(
     inout ForwardRay ray,   ///< Ray to cross
     const SurfaceHit hit    ///< Description of surface hit
 ) {
-<<<<<<< HEAD
 #ifdef RAY_PORTAL
-    //portal surface: no world-space offset (portalReframe sets position from the
-    //precise object-space hit); just swap the medium, then switch scene/frame.
+    //portal surface: no offset (portalChangeFrame takes care of that)
     if ((hit.flags & MATERIAL_PORTAL_BIT) != 0) {
         ResultCode result = updateMedium(ray, hit.otherMediumIdx);
-        if (result >= 0) portalReframe(ray, hit);
+        if (result >= 0) portalChangeFrame(ray, hit);
         return result;
     }
 #endif
-    ray.position = offsetRay(hit.worldPos, -hit.rayNrm);
-=======
     ray.position = offsetRay(hit.worldPos, hit.rayNrm, -hit.rayOffset);
->>>>>>> 0276a8499cf82168b3ecf2bf9e6128362d1d617d
     return updateMedium(ray, hit.otherMediumIdx);
 }
 
@@ -69,13 +63,11 @@ ResultCode transmitRay(
     vec3 newDir             ///< Ray in which to transmit
 ) {
 #ifdef RAY_PORTAL
-    //portal surface: a TRANSMITTED ray switches scene/frame (reflected rays don't,
-    //reflectRay is untouched). No world-space offset - portalReframe sets position
-    //from the precise object-space hit and re-expresses the (transmitted) direction
-    //in the target frame.
+    //portal surface: a TRANSMITTED ray switches scene/frame; no offset 
+    //(portalChangeFrame takes care of that)
     if ((hit.flags & MATERIAL_PORTAL_BIT) != 0) {
         ResultCode result = transmitRay(ray, newDir, hit.otherMediumIdx);
-        if (result >= 0) portalReframe(ray, hit);
+        if (result >= 0) portalChangeFrame(ray, hit);
         return result;
     }
 #endif
@@ -91,11 +83,6 @@ ResultCode transmitRay(
     const SurfaceHit hit,   ///< Description of surface hit
     float n_i, float n_o    ///< Refractive index of incident and outgoing medium
 ) {
-<<<<<<< HEAD
-=======
-    //offset ray to prevent self-intersection in next tracing step
-    ray.position = offsetRay(hit.worldPos, hit.rayNrm, -hit.rayOffset);
->>>>>>> 0276a8499cf82168b3ecf2bf9e6128362d1d617d
     vec3 newDir = refract(ray.direction, hit.rayNrm, n_i / n_o);
     //If we try to transmit the ray when we are in the region of total internal
     //reflection, refract() returns a zero vector -> notify

@@ -8,7 +8,7 @@ form, but NEE needs it in absolute terms: it is the `Z` in the BSDF the surface
 model implicitly defines.
 
 It is computed on the *device*, by `surface/microfacet/normalization.glsl`, from
-the surface model's own functions - `eval_microfacet_density` and
+the surface model's own functions - `evalMicrofacetDensity` and
 `roughFacetAcceptance`, the latter being the one the facet loop itself uses. A
 table can therefore not drift away from the sampling it normalizes, and the facet
 density, the Fresnel equations and the acceptance criteria exist exactly once.

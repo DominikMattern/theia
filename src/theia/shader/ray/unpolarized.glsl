@@ -42,8 +42,8 @@ struct ForwardRay {
     #ifdef RAY_PORTAL
     //(sceneId, context): sceneId 0 = main scene; context specifies the
     //instance of the sub-scene in case that multiple are placed. Only
-    //present for the MultiSceneForwardTracer (defines RAY_PORTAL).
-    ivec2 frame;
+    //present when tracing a MultiScene (defines RAY_PORTAL).
+    uvec2 frame;
     #endif
 };
 //tell other code this ray exist
@@ -105,7 +105,7 @@ ForwardRay createForwardRay(
         contrib,
         0.0
         #ifdef RAY_PORTAL
-        ,ivec2(0, 0)   //start in the main scene
+        ,uvec2(0, 0)   //start in the main scene
         #endif
     );
 }
@@ -132,7 +132,7 @@ ForwardRay createForwardRay(
         ,0.0
         #endif
         #ifdef RAY_PORTAL
-        ,ivec2(0, 0)   //start in the main scene
+        ,uvec2(0, 0)   //start in the main scene
         #endif
     );
 }
@@ -437,7 +437,7 @@ ForwardRay loadForwardRay(uvec2 queueAdr, uint queueSize, uint idx) {
         ,0.0
         #endif
         #ifdef RAY_PORTAL
-        ,ivec2(0, 0)   //queue path does not carry the frame (megakernel tracer only)
+        ,uvec2(0, 0)   //queue path does not carry the frame
         #endif
     );
 }
@@ -479,8 +479,8 @@ void saveWaveRay(
     #endif
 
     #ifdef RAY_PORTAL
-    _saveInt(ray.frame.x);
-    _saveInt(ray.frame.y);
+    _saveUInt(ray.frame.x);
+    _saveUInt(ray.frame.y);
     #endif
 
     _saveUInt(rayIdx);
@@ -512,8 +512,8 @@ ForwardRay loadWaveRay(
     #endif
 
     #ifdef RAY_PORTAL
-    int frameX = _loadInt;
-    int frameY = _loadInt;
+    uint frameX = _loadUInt;
+    uint frameY = _loadUInt;
     #endif
 
     rayIdx = _loadUInt;
@@ -533,7 +533,7 @@ ForwardRay loadWaveRay(
         ,log_contrib
         #endif
         #ifdef RAY_PORTAL
-        ,ivec2(frameX, frameY)
+        ,uvec2(frameX, frameY)
         #endif
     );
 }

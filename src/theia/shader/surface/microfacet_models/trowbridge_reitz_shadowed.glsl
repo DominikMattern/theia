@@ -12,14 +12,6 @@ is described in [1].
     (2023) https://pbr-book.org/4ed/Reflection_Models/Roughness_Using_Microfacet_Theory
 */
 
-/*
-Micro-facet parameters that are constant across a single surface interaction,
-i.e. do not depend on the sampled facet. They are computed once via
-prepare_microfacet() and then passed into sample_microfacet_normal() and
-microfacet_accept_prob() on every retry, so the loop-invariant roughness load, the
-local coordinate system and the hemispherical-configuration basis are not
-recomputed per iteration of the rejection loop.
-*/
 struct MicrofacetParams {
     float alpha;
     mat3 trafo;     //local coordinate system (surface normal = z-axis)
@@ -28,7 +20,7 @@ struct MicrofacetParams {
     vec3 T2;
 };
 
-MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
+MicrofacetParams prepareMicrofacet(vec3 rayDir, const SurfaceHit hit){
     MicrofacetParams params;
     params.alpha = loadMaterialConstant(ROUGHNESS_PARAMETER, hit.materialIdx);
 
@@ -46,7 +38,12 @@ MicrofacetParams prepare_microfacet(vec3 rayDir, const SurfaceHit hit){
     return params;
 }
 
-vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const SurfaceHit hit, uint idx, inout uint dim){
+vec3 sampleMicrofacetNormal(
+    const MicrofacetParams params,
+    vec3 rayDir,
+    const SurfaceHit hit,
+    uint idx, inout uint dim
+) {
 
     //sample point on unit disk
     vec3 p = sampleUnitDisk(random2D(idx, dim));
@@ -58,15 +55,15 @@ vec3 sample_microfacet_normal(const MicrofacetParams params, vec3 rayDir, const 
     //reproject to hemisphere and transform normal to ellipsoid configuration
     p.z = sqrt(max(0.0, 1.0 - dot(p,p)));
     vec3 nh = p.x * params.T1 + p.y * params.T2 + p.z * params.wh;
-    vec3 microfacetNormal_local = normalize(vec3(params.alpha * nh.x, params.alpha * nh.y, max(1e-6, nh.z)));
+    vec3 microfacetNormal_local = normalize(vec3(
+        params.alpha * nh.x, params.alpha * nh.y, max(1e-6, nh.z)));
 
     //transform from local to global coordinate system
     return params.trafo * microfacetNormal_local;
 }
 
-
 //masking of outgoing rays
-float masking_function(float cos_n, float alpha){
+float maskingFunction(float cos_n, float alpha){
     //handle very small cosines
     if(cos_n < 1e-3){
         return 0.0;
@@ -79,7 +76,7 @@ float masking_function(float cos_n, float alpha){
 
 
 #ifdef ROUGH_SURFACE_NEE
-//Deterministic twin of sample_microfacet_normal(): the density with which it
+//Deterministic twin of sampleMicrofacetNormal(): the density with which it
 //draws `microfacetNormal`, measured in solid angle. This is the distribution of
 //visible normals
 //
@@ -87,7 +84,12 @@ float masking_function(float cos_n, float alpha){
 //
 //with D the Trowbridge-Reitz NDF. Already normalized to one, and zero for
 //back-facing facets, so the front-face condition needs no separate factor.
-float eval_microfacet_density(const MicrofacetParams params, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
+float evalMicrofacetDensity(
+    const MicrofacetParams params,
+    vec3 microfacetNormal,
+    const SurfaceHit hit,
+    vec3 rayDir
+) {
     float cos_h = dot(microfacetNormal, hit.rayNrm);
     if (cos_h <= 0.0) return 0.0;
     //w_i points away from the surface, i.e. against the ray direction
@@ -101,15 +103,20 @@ float eval_microfacet_density(const MicrofacetParams params, vec3 microfacetNorm
     float d = a2 + tan2;
     float D = a2 / (PI * cos2 * cos2 * d * d);
 
-    return masking_function(cos_n, params.alpha) * cos_i * D / cos_n;
+    return maskingFunction(cos_n, params.alpha) * cos_i * D / cos_n;
 }
 
 #endif
 
-//Probability that this facet is accepted for the given outgoing direction.
-//The caller turns it into a decision by comparing against a single uniform.
-float microfacet_accept_prob(const MicrofacetParams params, vec3 dirOut, vec3 microfacetNormal, const SurfaceHit hit, vec3 rayDir){
-    return masking_function(abs(dot(dirOut, hit.rayNrm)), params.alpha);
+float microfacetAcceptProb(
+    const MicrofacetParams params,
+    vec3 dirOut,
+    vec3 microfacetNormal,
+    const SurfaceHit hit,
+    vec3 rayDir
+) {
+    //acceptance probability is given by the masking function
+    return maskingFunction(abs(dot(dirOut, hit.rayNrm)), params.alpha);
 }
 
 #endif

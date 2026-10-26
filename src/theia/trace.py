@@ -40,11 +40,9 @@ from typing import Callable, Literal, TypeVar, overload
 
 
 __all__ = [
-    "DEFAULT_WAVE_SCHEDULE",
     "EmptyEventCallback",
     "EventResultCode",
     "EventStatisticCallback",
-    "MultiSceneForwardTracer",
     "SceneBackwardTargetTracer",
     "SceneBackwardTracer",
     "SceneDirectTracer",
@@ -55,7 +53,6 @@ __all__ = [
     "VolumeBackwardTracer",
     "VolumeDirectTracer",
     "VolumeForwardTracer",
-    "WavefrontSceneForwardTracer",
 ]
 
 
@@ -376,9 +373,6 @@ class Tracer(PipelineStage):
         maxPathLength: int,
         nRNGSamples: int,
         maxHitsPerRay: int,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
     ) -> None:
         super().__init__(params, extra)
 
@@ -393,9 +387,6 @@ class Tracer(PipelineStage):
         self._maxPathLength = maxPathLength
         self._nRNGSamples = nRNGSamples
         self._maxHitsPerRay = maxHitsPerRay
-        self._rayOffsetScale = rayOffsetScale
-        self._rayOffsetOrigin = rayOffsetOrigin
-        self._rayOffsetThreshold = rayOffsetThreshold
         self.batchSize = batchSize
         response.prepare(self._getTraceConfig(), ray)
 
@@ -436,46 +427,6 @@ class Tracer(PipelineStage):
     def maxPathLength(self) -> int:
         """Maximum length of ray paths sampled"""
         return self._maxPathLength
-
-    @property
-    def rayOffsetScale(self) -> float | None:
-        """
-        Override for the self-intersection offset applied to coordinates at or
-        above `rayOffsetThreshold`, in ULP. `None` keeps the shader default.
-        """
-        return self._rayOffsetScale
-
-    @property
-    def rayOffsetOrigin(self) -> float | None:
-        """
-        Override for the absolute self-intersection offset applied to coordinates
-        below `rayOffsetThreshold`. `None` keeps the shader default.
-        """
-        return self._rayOffsetOrigin
-
-    @property
-    def rayOffsetThreshold(self) -> float | None:
-        """
-        Override for the `|coordinate|` at which the self-intersection offset
-        switches from the absolute `rayOffsetOrigin` to `rayOffsetScale` ULP.
-        `None` keeps the shader default (1/32).
-        """
-        return self._rayOffsetThreshold
-
-    def _rayOffsetMacros(self) -> dict[str, float]:
-        """
-        Preamble macros overriding the ray self-intersection offset. Contains
-        only the values explicitly set by the user; empty otherwise, in which
-        case the (recommended) shader defaults apply.
-        """
-        macros: dict[str, float] = {}
-        if self._rayOffsetScale is not None:
-            macros["RAY_OFFSET_SCALE"] = float(self._rayOffsetScale)
-        if self._rayOffsetOrigin is not None:
-            macros["RAY_OFFSET_ORIGIN"] = float(self._rayOffsetOrigin)
-        if self._rayOffsetThreshold is not None:
-            macros["RAY_OFFSET_THRESHOLD"] = float(self._rayOffsetThreshold)
-        return macros
 
     @property
     def normalization(self) -> float:
@@ -1266,8 +1217,8 @@ def _requireSingleScene(scene, name: str) -> None:
     """
     if isinstance(scene, MultiScene):
         raise ValueError(
-            f"{name} does not support portals; use MultiSceneForwardTracer "
-            "for a MultiScene."
+            f"{name} does not support portals; use SceneForwardTracer for a "
+            "MultiScene."
         )
 
 
@@ -1668,32 +1619,6 @@ class SceneBackwardTracer(Tracer):
         Whether to ignore contributions from direct lighting, i.e. paths with
         no scattering. Usefull if a dedicated tracer or estimator for direct
         light contributions is additionally used.
-    rayOffsetScale: float | None, default=None
-        Optional override for the self-intersection offset applied to coordinates
-        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
-        (`256.0`).
-
-        Upon hitting a surface the ray is offset towards the new volume to avoid
-        self-intersection due to numerical inaccuracies. The default value is
-        known to be a robust safeguard against self-intersection, but it is very
-        conservative. For thin volumes choosing a smaller offset might improve
-        the quality of the simulation.
-
-        !!! warning
-
-            Decreasing this value might introduce self-intersection artifacts.
-            This should only be done when necessary and with caution.
-    rayOffsetOrigin: float | None, default=None
-        Optional override for the absolute self-intersection offset applied to 
-        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
-        (`1/65536`). 
-    rayOffsetThreshold: float | None, default=None
-        Optional override for the `|coordinate|` at which the self-intersection
-        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
-        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
-        coordinates to the ULP branch, which scales with the coordinate, and thus
-        allows a much smaller absolute offset without it becoming a no-op just
-        below the threshold - one ULP there is `threshold * 2^-23`.
 
     Stage Parameters
     ----------------
@@ -1742,9 +1667,6 @@ class SceneBackwardTracer(Tracer):
         sampleCoefficient: float = float("NaN"),
         maxTime: float = float("inf"),
         disableDirectLighting: bool = False,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
     ) -> None:
         _requireSingleScene(scene, "SceneBackwardTracer")
         # we need ray tracing for this
@@ -1789,9 +1711,6 @@ class SceneBackwardTracer(Tracer):
             maxPathLength=maxPathLength,
             nRNGSamples=nRNG,
             maxHitsPerRay=maxHitsPerRay,
-            rayOffsetScale=rayOffsetScale,
-            rayOffsetOrigin=rayOffsetOrigin,
-            rayOffsetThreshold=rayOffsetThreshold,
         )
         # save params
         self._photons = wavelengthSource
@@ -1826,7 +1745,6 @@ class SceneBackwardTracer(Tracer):
             PROXY_RAY="BackwardRay",
             RAY_TRACING_PIPELINE=True,
             TRACE_RNG_STRIDE=nRngLoop,
-            **self._rayOffsetMacros(),
         )
         headers = {
             "callback.glsl": callback.sourceCode,
@@ -1970,8 +1888,8 @@ class SceneBackwardTracer(Tracer):
 
 class _WaveState:
     """
-    Device state and command sequence of the wavefront variant of the scene
-    target tracer, see `WavefrontSceneForwardTracer`.
+    Device state and command sequence of the scene target tracer with wavefront
+    compaction, see `SceneForwardTracer`.
 
     Holds the two queues the paths still alive are compacted into, one indirect
     launch counter per wave, and the per-dispatch parameter block. The queues
@@ -2004,8 +1922,6 @@ class _WaveState:
 
 
     class _WaveParams(Structure):
-        """Mirrors the `WaveParams` block in tracer/scene/target/wave.glsl"""
-
         _fields_ = [
             ("srcQueue", buffer_reference),
             ("dstQueue", buffer_reference),
@@ -2024,8 +1940,7 @@ class _WaveState:
         capacity: int,
     ) -> None:
         # Normalize the schedule: never trace beyond maxPathLength, and cover any
-        # remainder with a final wave, so a path the megakernel would have
-        # followed to its end does not get silently truncated here.
+        # remainder with a final wave.
         waves: list[int] = []
         total = 0
         for k in schedule:
@@ -2042,9 +1957,6 @@ class _WaveState:
         self._schedule = waves
 
         # Trace state handed from one wave to the next, as a structure of arrays.
-        # The queues carry no counter of their own: a counter serving as indirect
-        # launch argument has to be a (count, 1, 1) triple, which is a different
-        # layout, so they live in their own tensor below.
         self._item = ray.waveItem(portal=portal)
         self._queues = [
             QueueTensor(self._item, capacity, skipCounter=True) for _ in range(2)
@@ -2106,7 +2018,7 @@ class _WaveState:
             pipeline.bindParams(WaveParams=self._params[w])
             if w == 0:
                 # The first wave samples the light source and is sized by the
-                # batch size in the trace params, exactly like the megakernel.
+                # batch size in the trace params.
                 cmds.append(
                     pipeline.traceRaysIndirect(
                         traceParams, offset=batchSizeOffset, **sbt
@@ -2165,10 +2077,7 @@ class _SceneTargetTracer(Tracer):
         maxTime: float,
         targetGuide: TargetGuide | None,
         disableDirectLighting: bool,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
-        waveSchedule: Sequence[int] | None = None,
+        wavefrontCompactionSchedule: Sequence[int] | None = None,
     ) -> None:
         # we need ray tracing for this
         if not isRayTracingEnabled():
@@ -2219,9 +2128,6 @@ class _SceneTargetTracer(Tracer):
             maxPathLength=maxPathLength,
             nRNGSamples=nRNG,
             maxHitsPerRay=maxPathLength - 1 if disableDirectLighting else maxPathLength,
-            rayOffsetScale=rayOffsetScale,
-            rayOffsetOrigin=rayOffsetOrigin,
-            rayOffsetThreshold=rayOffsetThreshold,
         )
         # save params
         self._source = source
@@ -2248,20 +2154,22 @@ class _SceneTargetTracer(Tracer):
         inlineVolModule = len(volModels) <= 2
         self._dispatchIndirect = getEnabledRayTracingFeatures().indirectDispatch
         # optionally split the trace loop over several dispatches, compacting the
-        # paths still alive in between (see WavefrontSceneForwardTracer)
+        # paths still alive in between (see SceneForwardTracer)
         self._wave: _WaveState | None = None
-        if waveSchedule is not None:
+        if wavefrontCompactionSchedule is not None:
             if direction != "forward":
-                raise ValueError("Wavefront tracing requires a light source!")
+                raise ValueError("Wavefront compaction requires a light source!")
             if targetGuide is not None:
-                raise ValueError("Wavefront tracing does not support a target guide!")
+                raise ValueError(
+                    "Wavefront compaction does not support a target guide!"
+                )
             if not self._dispatchIndirect:
                 raise RuntimeError(
-                    "Wavefront tracing needs indirect dispatch, which this device "
-                    "does not support"
+                    "Wavefront compaction needs indirect dispatch, which this "
+                    "device does not support"
                 )
             self._wave = _WaveState(
-                waveSchedule,
+                wavefrontCompactionSchedule,
                 nTraces,
                 ray,
                 bool(scene.macros.get("RAY_PORTAL", False)),
@@ -2271,14 +2179,13 @@ class _SceneTargetTracer(Tracer):
             DISABLE_DIRECT_LIGHTING=disableDirectLighting,
             DISABLE_NEE=targetGuide is None,
             DISPATCH_INDIRECT=self._dispatchIndirect,
-            WAVE_TRACER=self._wave is not None,
+            WAVEFRONT_COMPACTION=self._wave is not None,
             INLINE_VOLUME_MODEL=inlineVolModule,
             PATH_LENGTH=nTraces,
             TRACE_DIRECTION=f"TRACE_DIRECTION_{direction.upper()}",
             PROXY_RAY=f"{direction.title()}Ray",
             RAY_TRACING_PIPELINE=True,
             TRACE_RNG_STRIDE=nRngLoop,
-            **self._rayOffsetMacros(),
             **scene.macros,
         )
         headers = {
@@ -2465,8 +2372,8 @@ class _SceneTargetTracer(Tracer):
     @property
     def waveState(self) -> _WaveState | None:
         """
-        State of the wavefront tracer, or `None` if the trace loop runs in a
-        single dispatch. See `WavefrontSceneForwardTracer`.
+        State of the wavefront compaction, or `None` if the trace loop runs in a
+        single dispatch. See `SceneForwardTracer`.
         """
         return self._wave
 
@@ -2494,330 +2401,10 @@ class SceneForwardTracer(_SceneTargetTracer):
     Depending on the geometry's material, rays may reflect or transmit through
     them.
 
-    Parameters
-    ----------
-    batchSize: int
-        Number of rays to simulate per run. Note that a single run may generate
-        up to twice `maxPathLength` hits.
-    ray: RayModel
-        Model of the ray to propagate.
-    source: LightSource
-        Source producing light rays
-    response: HitResponse
-        Response function simulating the detector
-    rng: RNG
-        Generator for creating random numbers
-    scene: Scene
-        Scene in which the rays are traced
-    capacity: int | None, default=None
-        Maximum batch size. If None, same as `batchSize`.
-    callback: TraceEventCallback, default=EmptyEventCallback()
-        Callback called for each tracing event. See `TraceEventCallback`.
-    maxPathLength: int, default=64
-        Maximum length of paths to simulate
-    targetId: int | None, default=None
-        Optionally limits responses to a single target id. Hits on other objects
-        even if they have the detector flag will be ignored.
-    sampleCoefficient: float, default=NaN
-        Optional coefficient used for sampling ray lengths. If the value is NaN
-        or negative, the volume will sample the ray length instead. Will always
-        be disabled, if the ray is a particle.
-    maxTime: float, default=inf
-        Rays exceeding this limit will aborted with code `decayed`.
-    targetGuide: TargetGuide | None, default=None
-        Optional target guide acting as proxy for the detector in next event
-        estimation. Used to sample alternative light paths connecting the light
-        source with the detector early during tracing.
-    disableDirectLighting: bool, default=False
-        Whether to ignore contributions from direct lighting, i.e. paths with
-        no scattering. Usefull if a dedicated tracer or estimator for direct
-        light contributions is additionally used.
-    rayOffsetScale: float | None, default=None
-        Optional override for the self-intersection offset applied to coordinates
-        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
-        (`256.0`).
-    
-        Upon hitting a surface the ray is offset towards the new volume to avoid
-        self-intersection due to numerical inaccuracies. The default value is
-        known to be a robust safeguard against self-intersection, but it is very
-        conservative. For thin volumes choosing a smaller offset might improve
-        the quality of the simulation.
-    
-        !!! warning
-    
-            Decreasing this value might introduce self-intersection artifacts.
-            This should only be done when necessary and with caution.
-    rayOffsetOrigin: float | None, default=None
-        Optional override for the absolute self-intersection offset applied to 
-        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
-        (`1/65536`). 
-    rayOffsetThreshold: float | None, default=None
-        Optional override for the `|coordinate|` at which the self-intersection
-        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
-        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
-        coordinates to the ULP branch, which scales with the coordinate, and thus
-        allows a much smaller absolute offset without it becoming a no-op just
-        below the threshold - one ULP there is `threshold * 2^-23`.
-    """
-
-    name = "Scene Forward Tracer"
-
-    def __init__(
-        self,
-        batchSize: int,
-        ray: RayModel,
-        source: LightSource,
-        response: HitResponse,
-        rng: RNG,
-        scene: Scene,
-        *,
-        capacity: int | None = None,
-        callback: TraceEventCallback = EmptyEventCallback(),
-        maxPathLength: int = 64,
-        targetId: int | None = None,
-        sampleCoefficient: float = float("NaN"),
-        maxTime: float = float("inf"),
-        targetGuide: TargetGuide | None = None,
-        disableDirectLighting: bool = False,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
-    ) -> None:
-        _requireSingleScene(scene, "SceneForwardTracer")
-        super().__init__(
-            batchSize,
-            ray,
-            source,
-            response,
-            rng,
-            scene,
-            capacity=capacity,
-            callback=callback,
-            lamSource=None,  # provided by light source
-            maxPathLength=maxPathLength,
-            targetId=targetId,
-            sampleCoefficient=sampleCoefficient,
-            maxTime=maxTime,
-            targetGuide=targetGuide,
-            disableDirectLighting=disableDirectLighting,
-            rayOffsetScale=rayOffsetScale,
-            rayOffsetOrigin=rayOffsetOrigin,
-            rayOffsetThreshold=rayOffsetThreshold,
-        )
-        self._lightSource = source
-
-    @property
-    def source(self) -> LightSource:
-        """Source producing rays"""
-        return self._lightSource
-
-
-class MultiSceneForwardTracer(_SceneTargetTracer):
-    """
-    Forward scene tracer that also traces one or more SUB-scenes in their own
-    LOCAL coordinate frames, entered through portal bounding boxes. This resolves
-    fine geometry (e.g. thin fibers) placed far from the world origin, where
-    single-precision world coordinates lose resolution.
-
-    Identical to `SceneForwardTracer`, except that it takes a `MultiScene`
-    instead of a `Scene`. The scene owns the whole portal setup - placing the
-    boxes, linking them and uploading the lookup tables - so this tracer merely
-    enables the corresponding shader path.
-
-    A sub-scene reached through several portal contexts is built ONCE, so its
-    detectors cannot be told apart by a single `objectId`. Pass a sequence to
-    `detectorId` (see `MeshStore.createInstance`) to assign one id per context;
-    a scalar id is broadcast to all of them. Only this tracer evaluates the
-    per-context ids. Note that `targetId` filters on the resolved id and thus
-    selects a single context once the ids differ.
-
-    Note: next-event estimation (`targetGuide`) is not yet supported together
-    with sub-scenes.
-
-    Parameters
-    ----------
-    batchSize: int
-        Number of rays to simulate per run. Note that a single run may generate
-            up to twice `maxPathLength` hits.
-    ray: RayModel
-        Model of the ray to propagate.
-    source: LightSource
-        Source producing light rays
-    response: HitResponse
-        Response function simulating the detector
-    rng: RNG
-        Generator for creating random numbers
-    scene: Scene
-        Scene in which the rays are traced
-    capacity: int | None, default=None
-        Maximum batch size. If None, same as `batchSize`.
-    callback: TraceEventCallback, default=EmptyEventCallback()
-        Callback called for each tracing event. See `TraceEventCallback`.
-    maxPathLength: int, default=64
-        Maximum length of paths to simulate
-    targetId: int | None, default=None
-        Optionally limits responses to a single target id. Hits on other objects
-        even if they have the detector flag will be ignored.
-    sampleCoefficient: float, default=NaN
-        Optional coefficient used for sampling ray lengths. If the value is NaN
-        or negative, the volume will sample the ray length instead. Will always
-        be disabled, if the ray is a particle.
-    maxTime: float, default=inf
-        Rays exceeding this limit will aborted with code `decayed`.
-    disableDirectLighting: bool, default=False
-        Whether to ignore contributions from direct lighting, i.e. paths with
-        no scattering. Usefull if a dedicated tracer or estimator for direct
-        light contributions is additionally used.
-    rayOffsetScale: float | None, default=None
-        Optional override for the self-intersection offset applied to coordinates
-        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
-        (`256.0`).
-        
-        Upon hitting a surface the ray is offset towards the new volume to avoid
-        self-intersection due to numerical inaccuracies. The default value is
-        known to be a robust safeguard against self-intersection, but it is very
-        conservative. For thin volumes choosing a smaller offset might improve
-        the quality of the simulation.
-        
-        !!! warning
-        
-            Decreasing this value might introduce self-intersection artifacts.
-            This should only be done when necessary and with caution.
-    rayOffsetOrigin: float | None, default=None
-        Optional override for the absolute self-intersection offset applied to 
-        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
-        (`1/65536`). 
-    rayOffsetThreshold: float | None, default=None
-        Optional override for the `|coordinate|` at which the self-intersection
-        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
-        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
-        coordinates to the ULP branch, which scales with the coordinate, and thus
-        allows a much smaller absolute offset without it becoming a no-op just
-        below the threshold - one ULP there is `threshold * 2^-23`.
-
-    See Also
-    --------
-    theia.scene.MultiScene: builds and owns the portal geometry
-    theia.scene.linkPortals: connects the portal boxes
-    """
-
-    name = "Multi-Scene Forward Tracer"
-
-    def __init__(
-        self,
-        batchSize: int,
-        ray: RayModel,
-        source: LightSource,
-        response: HitResponse,
-        rng: RNG,
-        scene: MultiScene,
-        *,
-        capacity: int | None = None,
-        callback: TraceEventCallback = EmptyEventCallback(),
-        maxPathLength: int = 64,
-        targetId: int | None = None,
-        sampleCoefficient: float = float("NaN"),
-        maxTime: float = float("inf"),
-        disableDirectLighting: bool = False,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
-    ) -> None:
-        if not isinstance(scene, MultiScene):
-            raise ValueError(
-                "MultiSceneForwardTracer expects a MultiScene; use "
-                "SceneForwardTracer for a single Scene."
-            )
-        super().__init__(
-            batchSize,
-            ray,
-            source,
-            response,
-            rng,
-            scene,
-            capacity=capacity,
-            callback=callback,
-            lamSource=None,  # provided by light source
-            maxPathLength=maxPathLength,
-            targetId=targetId,
-            sampleCoefficient=sampleCoefficient,
-            maxTime=maxTime,
-            targetGuide=None, # not supported
-            disableDirectLighting=disableDirectLighting,
-            rayOffsetScale=rayOffsetScale,
-            rayOffsetOrigin=rayOffsetOrigin,
-            rayOffsetThreshold=rayOffsetThreshold,
-        )
-        self._lightSource = source
-
-    @property
-    def source(self) -> LightSource:
-        """Source producing rays"""
-        return self._lightSource
-
-    @property
-    def scene(self) -> MultiScene:
-        """Scene the tracer propagates rays in"""
-        return self._scene  # type: ignore[return-value]
-
-
-
-DEFAULT_WAVE_SCHEDULE = (1,) * 32
-"""
-Default number of trace iterations per wave of `WavefrontSceneForwardTracer`:
-compact after each of the first 32 iterations, then trace whatever is left in a
-single wave (the tracer always extends the schedule to cover `maxPathLength`).
-
-Deliberately simple, since the schedule that pays off depends on how the path
-lengths of a workload are distributed - the early iterations are where the bulk
-of the paths dies in most setups, which is what this covers. Workloads with a
-long tail of surviving paths do better with waves that grow towards the end;
-see `WavefrontSceneForwardTracer` for how to measure that with `waveCounts()`.
-"""
-
-
-class WavefrontSceneForwardTracer(_SceneTargetTracer):
-    """
-    Forward scene tracer that splits the trace loop over several dispatches
-    ("waves"), compacting the paths that are still alive in between.
-
-    Identical results to `SceneForwardTracer` / `MultiSceneForwardTracer` - it
-    accepts both a `Scene` and a `MultiScene` - but it does not leave a warp
-    waiting for its longest-lived lane. After each wave the surviving paths are
-    appended to a queue via an atomic counter, and the next wave is dispatched
-    with exactly that many rays (`traceRaysIndirect` reads the counter from
-    device memory), so its warps are filled with long-lived paths only.
-
-    Paths keep their id (`idx`) across waves, so both the random numbers they
-    draw and the id a response is attributed to are unaffected by the compaction.
-
-    When this pays off
-    ------------------
-    Two conditions have to hold, and the second one is easy to miss:
-
-    1. Path lengths vary strongly across a batch, e.g. a small fraction of the
-       photons is guided in fibers and sees hundreds of surface interactions
-       while the rest is absorbed after a few.
-    2. `batchSize` has to be considerably larger than the number of warps the
-       device can keep resident (streaming multiprocessors times warps per
-       multiprocessor). Below that every warp of a batch is resident from the
-       start, idle lanes cost no instruction issue, and compacting only adds
-       dispatch and queue overhead.
-
-    Measured on a fiber setup (mean path length 30, max ~1500) on a device
-    holding ~2300 warps, tracing the same batch with the same results:
-
-    ======================  ==========  ==========  =======
-    paths per batch          warps       megakernel  speedup
-    ======================  ==========  ==========  =======
-    42k                      1.3k        33 ms       0.69x
-    167k                     5.2k        109 ms      1.37x
-    332k                     10.4k       209 ms      1.88x
-    666k                     20.8k       412 ms      3.03x
-    ======================  ==========  ==========  =======
-
-    So use it for large batches, and keep the single dispatch tracers for small
-    ones.
+    Accepts both a `Scene` and a `MultiScene`. The latter additionally traces
+    one or more SUB-scenes in their own LOCAL coordinate frames, entered through
+    portals. This can be used to resolve fine geometries that are placed far away
+    from the origin.
 
     Parameters
     ----------
@@ -2848,40 +2435,38 @@ class WavefrontSceneForwardTracer(_SceneTargetTracer):
         or negative, the volume will sample the ray length instead. Will always
         be disabled, if the ray is a particle.
     maxTime: float, default=inf
-        Max total time including delay from the source and travel time, after
-        which a ray gets stopped
+        Rays exceeding this limit will aborted with code `decayed`.
+    targetGuide: TargetGuide | None, default=None
+        Optional target guide acting as proxy for the detector in next event
+        estimation. Used to sample alternative light paths connecting the light
+        source with the detector early during tracing. Not yet supported
+        together with a `MultiScene`.
     disableDirectLighting: bool, default=False
-        Whether to ignore contributions from direct lighting, i.e. light paths
-        with no scattering.
-    waveSchedule: int[], default=DEFAULT_WAVE_SCHEDULE
-        Number of trace iterations each dispatch performs. Entries are clipped so
-        that the total never exceeds `maxPathLength`, and a final wave covering
-        the remainder is appended if needed - the traced path length is therefore
-        the same as for the other tracers, regardless of the schedule.
-    rayOffsetScale: float | None, default=None
-        Override for the self-intersection offset applied to coordinates at or
-        above `rayOffsetThreshold`, in ULP. `None` keeps the shader default.
-    rayOffsetOrigin: float | None, default=None
-        Override for the absolute self-intersection offset applied to coordinates
-        below `rayOffsetThreshold`. `None` keeps the shader default.
-    rayOffsetThreshold: float | None, default=None
-        Override for the `|coordinate|` at which the self-intersection offset
-        switches from the absolute `rayOffsetOrigin` to `rayOffsetScale` ULP.
-        `None` keeps the shader default.
+        Whether to ignore contributions from direct lighting, i.e. paths with
+        no scattering. Usefull if a dedicated tracer or estimator for direct
+        light contributions is additionally used.
+    wavefrontCompactionSchedule: Sequence[int] | None, default=None
+        If not None, splits the trace loop over several dispatches ("waves"),
+        compacting the paths that are still alive in between. Each entry is the
+        number of trace iterations the corresponding dispatch performs. Entries
+        are clipped so that the total never exceeds `maxPathLength`, and a final
+        wave covering the remainder is appended if needed - the traced path
+        length is therefore the same as without compaction, regardless of the
+        schedule. If None, the whole trace loop runs in a single dispatch.
 
     Note
     ----
-    Next event estimation (`targetGuide`) is not supported. The device must
-    support indirect dispatch, i.e. `getEnabledRayTracingFeatures()
-    .indirectDispatch` must be `True`.
+    Wavefront compaction does not support next event estimation
+    (`targetGuide`) and requires the device to support indirect dispatch, i.e.
+    `getEnabledRayTracingFeatures().indirectDispatch` must be `True`.
 
     See Also
     --------
-    theia.trace.SceneForwardTracer: single dispatch per batch
-    theia.trace.MultiSceneForwardTracer: single dispatch, sub-scenes via portals
+    theia.scene.MultiScene: builds and owns the portal geometry
+    theia.scene.linkPortals: connects the portal boxes
     """
 
-    name = "Wavefront Scene Forward Tracer"
+    name = "Scene Forward Tracer"
 
     def __init__(
         self,
@@ -2898,12 +2483,15 @@ class WavefrontSceneForwardTracer(_SceneTargetTracer):
         targetId: int | None = None,
         sampleCoefficient: float = float("NaN"),
         maxTime: float = float("inf"),
+        targetGuide: TargetGuide | None = None,
         disableDirectLighting: bool = False,
-        waveSchedule: Sequence[int] = [1] * 32,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
+        wavefrontCompactionSchedule: Sequence[int] | None = None,
     ) -> None:
+        if isinstance(scene, MultiScene) and targetGuide is not None:
+            raise ValueError(
+                "Next event estimation (targetGuide) is not yet supported "
+                "together with a MultiScene."
+            )
         super().__init__(
             batchSize,
             ray,
@@ -2918,12 +2506,9 @@ class WavefrontSceneForwardTracer(_SceneTargetTracer):
             targetId=targetId,
             sampleCoefficient=sampleCoefficient,
             maxTime=maxTime,
-            targetGuide=None,  # not supported
+            targetGuide=targetGuide,
             disableDirectLighting=disableDirectLighting,
-            rayOffsetScale=rayOffsetScale,
-            rayOffsetOrigin=rayOffsetOrigin,
-            rayOffsetThreshold=rayOffsetThreshold,
-            waveSchedule=waveSchedule,
+            wavefrontCompactionSchedule=wavefrontCompactionSchedule,
         )
         self._lightSource = source
 
@@ -2933,23 +2518,25 @@ class WavefrontSceneForwardTracer(_SceneTargetTracer):
         return self._lightSource
 
     @property
-    def waveSchedule(self) -> list[int]:
-        """Number of trace iterations each dispatch performs"""
-        assert self._wave is not None
-        return self._wave.schedule
+    def wavefrontCompactionSchedule(self) -> list[int] | None:
+        """
+        Normalized number of trace iterations each dispatch performs, or `None`
+        if wavefront compaction is disabled.
+        """
+        return None if self._wave is None else self._wave.schedule
 
     def waveCounts(self) -> list[int]:
         """
         Number of paths each wave AFTER the first was launched with in the batch
-        that ran last, i.e. how many paths survived each wave. Useful for
-        checking how well the schedule matches the actual path lengths.
+        that ran last, i.e. how many paths survived each wave.
 
         Retrieves the counters from the device and thus must not be called while
         a batch is still in flight. Note that the counters are reset at the start
-        of every batch, so this describes the last batch only - which may well be
-        a small or even empty remainder.
+        of every batch, so this describes the last batch only. Requires wavefront
+        compaction to be enabled.
         """
-        assert self._wave is not None
+        if self._wave is None:
+            raise RuntimeError("Wavefront compaction is not enabled!")
         return self._wave.counts()
 
 
@@ -3001,34 +2588,6 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         Whether to ignore contributions from direct lighting, i.e. paths with
         no scattering. Usefull if a dedicated tracer or estimator for direct
         light contributions is additionally used.
-    rayOffsetScale: float | None, default=None
-        Optional override for the self-intersection offset applied to coordinates
-        with (`|coordinate| >= 1/32`), in ULP. `None` keeps the shader default
-        (`256.0`).
-        
-        Upon hitting a surface the ray is offset towards the new volume to avoid
-        self-intersection due to numerical inaccuracies. The default value is
-        known to be a robust safeguard against self-intersection, but it is very
-        conservative. For thin volumes choosing a smaller offset might improve
-        the quality of the simulation.
-        
-        !!! warning
-        
-            Decreasing this value might introduce self-intersection artifacts.
-            This should only be done when necessary and with caution.
-    rayOffsetOrigin: float | None, default=None
-        Optional override for the absolute self-intersection offset applied to 
-        coordinates below `rayOffsetThreshold`. `None` keeps the shader default
-        (`1/65536`). 
-    rayOffsetThreshold: float | None, default=None
-        Optional override for the `|coordinate|` at which the self-intersection
-        offset switches from the absolute `rayOffsetOrigin` to `rayOffsetScale`
-        ULP. `None` keeps the shader default (`1/32`). Lowering it hands small
-        coordinates to the ULP branch, which scales with the coordinate, and thus
-        allows a much smaller absolute offset without it becoming a no-op just
-        below the threshold - one ULP there is `threshold * 2^-23`.
-        
-        See also `rayOffsetScale`.
     """
 
     name = "Scene Backward Target Tracer"
@@ -3051,9 +2610,6 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         maxTime: float = float("inf"),
         targetGuide: TargetGuide | None = None,
         disableDirectLighting: bool = False,
-        rayOffsetScale: float | None = None,
-        rayOffsetOrigin: float | None = None,
-        rayOffsetThreshold: float | None = None,
     ) -> None:
         _requireSingleScene(scene, "SceneBackwardTargetTracer")
         super().__init__(
@@ -3072,9 +2628,6 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
             maxTime=maxTime,
             targetGuide=targetGuide,
             disableDirectLighting=disableDirectLighting,
-            rayOffsetScale=rayOffsetScale,
-            rayOffsetOrigin=rayOffsetOrigin,
-            rayOffsetThreshold=rayOffsetThreshold,
         )
         self._camera = camera
         self._photons = wavelengthSource

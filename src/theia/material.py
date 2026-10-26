@@ -404,8 +404,9 @@ class MaterialFlags(IntFlag):
     Marks the surface as a portal: on crossing, the tracer switches the photon
     to another acceleration structure (sub-scene) and re-expresses the ray in
     that sub-scene's local coordinate frame. The crossing is medium-neutral (the
-    ray keeps its medium). Only the `MultiSceneForwardTracer` acts on this flag;
-    other tracers ignore it. Usually combined with `SKIP_MEDIA_MISMATCH_TEST`.
+    ray keeps its medium). Only the forward scene tracers given a `MultiScene`
+    act on this flag; other tracers ignore it. Usually combined with
+    `SKIP_MEDIA_MISMATCH_TEST`.
     """
 
 

@@ -29,7 +29,7 @@ These models have no independently defined BSDF - it is defined by the sampler.
 prepareSurface() draws facets until one is accepted, so the density of the
 accepted facet is renormalized by the acceptance rate Z. Undoing the half vector
 Jacobian gives, with w_i = -ray.direction, w_o = newDir, h the half vector,
-c = dot(w_i,h) and a() = microfacet_accept_prob():
+c = dot(w_i,h) and a() = microfacetAcceptProb():
 
                  D_p(h) * F(c) * a(w_o,h)
     f(w_i->w_o) = ------------------------            (reflection)
@@ -90,9 +90,9 @@ bool roughReflectionTerm(
     c = dot(w_i, h);
     if (c <= 0.0) return false;
 
-    D = eval_microfacet_density(mfParams, h, hit, ray.direction);
+    D = evalMicrofacetDensity(mfParams, h, hit, ray.direction);
     F = roughFresnel(c, props);
-    a = microfacet_accept_prob(mfParams, w_o, h, hit, ray.direction);
+    a = microfacetAcceptProb(mfParams, w_o, h, hit, ray.direction);
     return true;
 }
 
@@ -125,9 +125,9 @@ bool roughRefractionTerm(
     if (abs(denom) < 1e-9) return false;
 
     jacobian = n_o * n_o * abs(c_o) / (denom * denom);
-    D = eval_microfacet_density(mfParams, h, hit, ray.direction);
+    D = evalMicrofacetDensity(mfParams, h, hit, ray.direction);
     F = roughFresnel(c_i, props);
-    a = microfacet_accept_prob(mfParams, w_o, h, hit, ray.direction);
+    a = microfacetAcceptProb(mfParams, w_o, h, hit, ray.direction);
     return true;
 }
 #endif
@@ -153,7 +153,7 @@ float roughScatterPdf(
     if (cos_o == 0.0) return 0.0;
     if (cos_o > 0.0 ? !canReflect : !canTransmit) return 0.0;
 
-    MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
+    MicrofacetParams mfParams = prepareMicrofacet(ray.direction, hit);
     float D, c, F, a;
 
     if (cos_o > 0.0) {
@@ -195,7 +195,7 @@ float roughBsdf(
     float Z = roughNormalization(ray, hit, props);
     if (Z <= 0.0) return 0.0;
 
-    MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
+    MicrofacetParams mfParams = prepareMicrofacet(ray.direction, hit);
     float D, c, F, a;
 
     if (cos_o > 0.0) {
@@ -233,8 +233,8 @@ vec3 sampleSurfaceScattering(
     bool canReflect, canTransmit;
     roughChannels(hit, canReflect, canTransmit);
 
-    MicrofacetParams mfParams = prepare_microfacet(ray.direction, hit);
-    vec3 h = sample_microfacet_normal(mfParams, ray.direction, hit, idx, dim);
+    MicrofacetParams mfParams = prepareMicrofacet(ray.direction, hit);
+    vec3 h = sampleMicrofacetNormal(mfParams, ray.direction, hit, idx, dim);
     float u = random(idx, dim);
 
     prob = 0.0;

@@ -12,15 +12,18 @@ from ctypes import Structure, c_double, c_float, c_int32, c_uint32, c_uint64
 from hephaistos.glsl import buffer_reference
 
 from theia.compiler import createPreamble, compileShader, loadShader
+from theia.light import _make_scalar_array
 from theia.ray import RayModel
 from theia.random import RNG
 from theia.util import createCType
 import theia.units as u
 
-from numpy.typing import ArrayLike
+from collections.abc import Iterable
+from numpy.typing import ArrayLike, NDArray
 
 
 __all__ = [
+    "BatchedIntegratingHitResponse",
     "BinReducer",
     "CustomValueResponse",
     "EmptyResponse",
@@ -849,6 +852,259 @@ class IntegratingHitResponse(ValueHitResponse):
     def result(self, i: int) -> ArrayLike:
         """The result of the i-th buffer"""
         return self._reducer.result(i)
+
+    def update(self, i: int) -> None:
+        super().update(i)
+        self._reducer.update(i)
+
+    def run(self, i: int) -> list[hp.Command]:
+        return self._reducer.run(i)
+
+
+class BatchedIntegratingHitResponse(ValueHitResponse):
+    """
+    Response function summing up the values of hits separately for each bin
+    and optionally detector, where the paths of a batch are partitioned into
+    cells mapping onto bins.
+
+    A batch is partitioned into `cellsPerBatch` cells, each owning a consecutive
+    block of paths as given by `count`, analogous to
+    `BatchedSpectrumWavelengthSource`. Each cell's hits are summed into the bin
+    given by `binIndex`, or into the bin of the same index if no mapping is
+    given. Several cells may share a bin. Hits of paths beyond the last cell as
+    well as of cells mapping to a bin outside `[0, binCount)` are ignored.
+
+    This allows for instance to create optical maps, where each cell is a voxel
+    (see `VoxelLightSource`), or to sum up the light of track segments per event
+    by mapping each segment to the bin of its event.
+
+    Optionally, the sum of squared values is computed alongside, which allows to
+    estimate the variance. Note that squares are taken per hit, i.e. the
+    estimate is only exact if each path produces at most one hit per bin, e.g.
+    if detectors are black bodies and next event estimation is disabled.
+
+    Parameters
+    ----------
+    response: ValueResponse
+        Value response processing hits.
+    cellsPerBatch: int
+        Number of cells a batch is partitioned into, i.e. the length of `count`
+        and `binIndex`.
+    count: int | Iterable[int], default=0
+        Number of paths each cell owns. A single value is broadcast to every
+        cell; an array must have length `cellsPerBatch`.
+    binIndex: Iterable[int] | None, default=None
+        Bin each cell's hits are summed into. Must have length `cellsPerBatch`.
+        If `None`, the i-th cell maps to the i-th bin.
+    binCount: int | None, default=None
+        Number of bins. Defaults to `cellsPerBatch`.
+    detectorCount: int | None, default=None
+        Number of distinct detectors as identified by their `objectId`. Hits of
+        detectors with an `objectId` outside `[0, detectorCount)` are ignored.
+        If `None`, all hits will be integrated into one value per bin regardless
+        of their `objectId`.
+    storeSquares: bool, default=True
+        Whether to also sum up the squared values.
+    bufferCount: int, default=32
+        Number of internal buffers used to increase performance. Tuning this
+        value can further increase performance.
+    useDoublePrecision: bool, default=True
+        Whether to use double precision while summing up individual hits.
+        Using double precision results in less numerical error, but may impact
+        performance.
+    updateResponse: bool, default=True
+        If True, when this stage is requested to update by e.g. a pipeline it
+        will also cause the response to update.
+
+    Stage Parameters
+    ----------------
+    count: int | Iterable[int]
+        Number of paths each cell owns.
+    binIndex: Iterable[int]
+        Bin each cell's hits are summed into. Only present if the response was
+        constructed with `binIndex`.
+
+    Note
+    ----
+    Unlike most other responses, the sums are not normalized by the tracer, i.e.
+    they still have to be divided by the number of paths contributing to a bin
+    to get e.g. an estimate of the detection probability.
+    """
+
+    name = "Batched Integrating Hit Response"
+
+    def __init__(
+        self,
+        response: ValueResponse,
+        cellsPerBatch: int,
+        *,
+        count: int | Iterable[int] = 0,
+        binIndex: Iterable[int] | None = None,
+        binCount: int | None = None,
+        detectorCount: int | None = None,
+        storeSquares: bool = True,
+        bufferCount: int = 32,
+        useDoublePrecision: bool = True,
+        updateResponse: bool = True,
+    ) -> None:
+        if cellsPerBatch < 1:
+            raise ValueError(f"cellsPerBatch must be at least one, got {cellsPerBatch}")
+        if binCount is None:
+            binCount = cellsPerBatch
+        if binCount < 1:
+            raise ValueError(f"binCount must be at least one, got {binCount}")
+        if detectorCount is not None and detectorCount < 1:
+            raise ValueError(f"detectorCount must be at least one, got {detectorCount}")
+
+        # the bin index is only added when asked for
+        fields = [
+            ("_bufferAdr", buffer_reference),
+            ("_bufferCount", c_uint32),
+            ("_bufferSize", c_uint32),
+            ("_binCount", c_uint32),
+            ("_detectorCount", c_uint32),
+            ("cumulativeCount", _make_scalar_array(c_uint32, np.uint32, cellsPerBatch)),
+        ]
+        if binIndex is not None:
+            fields.append(
+                ("binIndex", _make_scalar_array(c_uint32, np.uint32, cellsPerBatch))
+            )
+
+        class ResponseParams(Structure):
+            _fields_ = fields
+
+        super().__init__(
+            response,
+            {"ResponseParams": ResponseParams},
+            {"count"},
+            updateResponse=updateResponse,
+        )
+        self._cellsPerBatch = cellsPerBatch
+        self._binCount = binCount
+        self._detCount = detectorCount
+        self._hasBinIndex = binIndex is not None
+        self._storeSquares = storeSquares
+        self._useDouble = useDoublePrecision
+        # allocate buffers via reducer
+        nEntries = binCount * (detectorCount or 1)
+        bufferSize = 2 * nEntries if storeSquares else nEntries
+        self._reducer = BinReducer(
+            binCount=bufferSize,
+            bufferCount=bufferCount,
+            useDoublePrecision=useDoublePrecision,
+        )
+
+        def norm(value, name):
+            """Broadcast a scalar over the batch, or check an array's length."""
+            array = np.asarray(value, np.uint32)
+            if array.ndim == 0:
+                return np.full(cellsPerBatch, array, np.uint32)
+            if array.size != cellsPerBatch:
+                raise ValueError(
+                    f"'{name}' must have length {cellsPerBatch}, got {array.size}"
+                )
+            return array
+
+        # set params
+        params = {"count": norm(count, "count")}
+        if self._hasBinIndex:
+            params["binIndex"] = norm(binIndex, "binIndex")
+        self.setParams(
+            _bufferAdr=self._reducer.bufferIn.address,
+            _bufferCount=bufferCount,
+            _bufferSize=bufferSize,
+            _binCount=binCount,
+            _detectorCount=detectorCount or 1,
+            **params,
+        )
+
+    @property
+    def binCount(self) -> int:
+        """Number of bins"""
+        return self._binCount
+
+    @property
+    def cellsPerBatch(self) -> int:
+        """Number of cells a batch is partitioned into"""
+        return self._cellsPerBatch
+
+    @property
+    def detectorCount(self) -> int | None:
+        """
+        Number of distinct detectors or `None` if all detectors are integrated
+        into a single value per bin.
+        """
+        return self._detCount
+
+    @property
+    def hasBinIndex(self) -> bool:
+        """Whether cells are mapped onto bins via `binIndex`"""
+        return self._hasBinIndex
+
+    @property
+    def storeSquares(self) -> bool:
+        """Whether the sum of squared values is computed as well"""
+        return self._storeSquares
+
+    @property
+    def sourceCode(self) -> str:
+        preamble = createPreamble(
+            RESPONSE_CELLS_PER_BATCH=self.cellsPerBatch,
+            RESPONSE_BIN_INDEX=self.hasBinIndex,
+            RESPONSE_INTEGRATE_ALL=self.detectorCount is None,
+            RESPONSE_STORE_SQUARES=self.storeSquares,
+            BinBuffer="DoubleBuffer" if self._useDouble else "FloatBuffer",
+            BinScalar="float64_t" if self._useDouble else "float",
+        )
+        code = loadShader("response/value/batched.glsl")
+        return "\n".join(
+            [
+                preamble,
+                '#line 1 "value.glsl"',
+                self.valueResponse.sourceCode,
+                '#line 1 "response/value/batched.glsl"',
+                code,
+            ]
+        )
+
+    def _result(self, i: int) -> NDArray:
+        shape = (self.binCount,)
+        if self.detectorCount is not None:
+            shape = (self.binCount, self.detectorCount)
+        result = np.asarray(self._reducer.result(i))
+        return result.reshape((2 if self.storeSquares else 1, *shape))
+
+    def result(self, i: int) -> NDArray:
+        """
+        Sum of values per bin of the batch run using the i-th configuration.
+        Has shape `(binCount, detectorCount)`, or `(binCount,)` if all detectors
+        are integrated. The array may be a view into a buffer, which gets
+        overwritten by the next batch using the same configuration.
+        """
+        return self._result(i)[0]
+
+    def squares(self, i: int) -> NDArray:
+        """
+        Sum of squared values per bin of the batch run using the i-th
+        configuration. Same shape as `result`. The array may be a view into a
+        buffer, which gets overwritten by the next batch using the same
+        configuration. Only available if `storeSquares` is set.
+        """
+        if not self.storeSquares:
+            raise RuntimeError("Squares are only computed if storeSquares is set")
+        return self._result(i)[1]
+
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        # accumulate in 64 bit: the running sum may exceed what a single cell
+        # can hold long before the total exceeds the uint32 the shader reads
+        c = np.cumsum(np.asarray(self.getParam("count"), np.uint64))
+        if len(c) and c[-1] > np.iinfo(np.uint32).max:
+            raise ValueError(
+                f"{c[-1]} paths exceed the {np.iinfo(np.uint32).max} the shader "
+                "can index; use a smaller batch"
+            )
+        self.setParam("cumulativeCount", c)
 
     def update(self, i: int) -> None:
         super().update(i)

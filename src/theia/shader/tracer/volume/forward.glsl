@@ -182,6 +182,8 @@ void main() {
     
     //sample ray
     ForwardRay ray = sampleLight(idx, dim);
+    //light sources reject a sample with a zero direction (see api.glsl)
+    if (ray.direction == vec3(0.0)) return;
     onEvent(ray, RESULT_CODE_RAY_CREATED, idx, 0);
     //discard ray if inside target
     if (isOccludedByTarget(ray.position)) {

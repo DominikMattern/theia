@@ -4,8 +4,6 @@
 #include "ray.glsl"
 #include "rng.glsl"
 #include "callback.glsl"
-#include "photon.glsl"
-#include "source.glsl"
 
 #include "tracer/scene/target/config.glsl"
 #include "tracer/scene/volume/proxy.glsl"
@@ -13,12 +11,17 @@
 
 #include "tracer/scene/target/io.glsl"
 
-#ifdef WAVE_TRACER
+//user provided code
+//included after the trace params so light sources can query the scene
+#include "photon.glsl"
+#include "source.glsl"
+
+#ifdef WAVEFRONT_COMPACTION
 #include "tracer/scene/target/wave.glsl"
 #endif
 
 #ifdef RAY_PORTAL
-#include "tracer/scene/portal/portal.glsl"
+#include "tracer/scene/portal.glsl"
 #endif
 
 #ifndef DISABLE_NEE
@@ -43,7 +46,7 @@ ResultCode trace(
     traceRayEXT(
         #ifdef RAY_PORTAL
         //main TLAS or the photon's current sub-scene TLAS (local frame)
-        accelerationStructureEXT(portalSelectTlas(ray.frame)),
+        accelerationStructureEXT(portalSelectTlas(ray.frame, params.tlas)),
         #else
         accelerationStructureEXT(params.tlas),
         #endif
@@ -72,18 +75,14 @@ void main() {
     uint pathLength = 0;
     TRACE_RAY ray;
 
-#ifdef WAVE_TRACER
+#ifdef WAVEFRONT_COMPACTION
     /*******************************************************************
-    *   Wavefront tracer: only the first wave samples the source, the   *
-    *   later ones pick the paths that survived out of the queue. The   *
-    *   branch is on a uniform, so it costs no divergence - and having  *
-    *   a single entry point keeps the binding layout of this shader    *
-    *   consistent with the hit and miss shaders (see wave.glsl).       *
+    *   Wavefront compaction: only the first wave samples the source,   *
+    *   the later ones pick the paths that survived out of the queue.   *
     *******************************************************************/
     if (waveParams.firstWave == 0) {
         //gl_LaunchIDEXT.x is the queue slot here, NOT the path id: that one is
-        //restored from the record, together with the position in the RNG
-        //sequence and the number of iterations already done.
+        //restored from the record.
         ray = loadWaveRay(
             waveParams.srcQueue, waveParams.capacity, gl_LaunchIDEXT.x,
             idx, dim, pathLength
@@ -101,6 +100,8 @@ void main() {
         #if TRACE_DIRECTION ==  TRACE_DIRECTION_FORWARD
         //sample light ray
         ray = sampleLight(idx, dim);
+        //light sources reject a sample with a zero direction
+        if (ray.direction == vec3(0.0)) return;
         onEvent(ray, RESULT_CODE_RAY_CREATED, idx, 0);
         #elif TRACE_DIRECTION == TRACE_DIRECTION_BACKWARD
         //sample camera
@@ -121,10 +122,7 @@ void main() {
     }
 
     //trace loop
-    //Without WAVE_TRACER this is the whole path: pathLength is zero and the
-    //wave covers all PATH_LENGTH iterations, i.e. i runs 1..PATH_LENGTH as
-    //before. The wavefront tracer instead bounds it per dispatch.
-#ifdef WAVE_TRACER
+#ifdef WAVEFRONT_COMPACTION
     uint last = pathLength + waveParams.iterations;
 #else
     uint last = PATH_LENGTH;
@@ -144,18 +142,15 @@ void main() {
         if (result < 0) return;
     }
 
-#ifdef WAVE_TRACER
+#ifdef WAVEFRONT_COMPACTION
     /*******************************************************************
     *   Still alive after this wave -> hand the path over to the next   *
     *   one. The counter both allocates the slots and sizes the next    *
     *   (indirect) dispatch.                                            *
     *                                                                   *
-    *   One atomic per subgroup instead of one per lane: it is 32x       *
-    *   fewer atomics, but more importantly it keeps the survivors of a  *
-    *   subgroup in CONSECUTIVE slots. Neighbouring launch indices are   *
-    *   neighbouring photons of the same emission segment and thus trace *
-    *   nearby geometry, so preserving their order preserves the memory  *
-    *   locality the compaction would otherwise scramble.                *
+    *   One atomic per subgroup instead of one per lane: it is 32x      *
+    *   fewer atomics, and it keeps the survivors of a subgroup in      *
+    *   CONSECUTIVE slots.                                              *
     *******************************************************************/
     uint count = subgroupAdd(1u);
     uint offset = subgroupExclusiveAdd(1u);

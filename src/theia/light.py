@@ -10,7 +10,7 @@ from hephaistos.pipeline import PipelineStage, SourceCodeMixin
 from hephaistos.queue import IOQueue
 
 from ctypes import Structure, c_float, c_uint32, c_uint64, addressof, memmove, sizeof
-from hephaistos.glsl import buffer_reference, vec2, vec3
+from hephaistos.glsl import buffer_reference, uvec3, vec2, vec3
 from theia.util import createCType
 
 from theia.compiler import compileShader, createPreamble, loadShader
@@ -43,6 +43,7 @@ __all__ = [
     "StreamingHostLightSource",
     "StreamingHostWavelengthSource",
     "UniformWavelengthSource",
+    "VoxelLightSource",
     "WavelengthSource",
     "frankTamm",
 ]
@@ -1276,6 +1277,282 @@ class SphericalLightSource(LightSource):
         # -> divide contrib by parameter space volume
         c /= 4.0 * np.pi
         self.setParam("_contribBwd", c)
+
+
+class VoxelLightSource(LightSource):
+    """
+    Isotropic light source sampling positions uniformly inside the cells (voxels)
+    of a regular grid spanning an axis aligned box.
+
+    Consecutive blocks of `raysPerCell` rays are assigned to consecutive cells,
+    i.e. the ray with index `idx` within a batch starts inside the cell with
+    flat index `cellOffset + idx // raysPerCell`. Cells are enumerated in C
+    order, i.e. `numpy.ravel_multi_index((ix, iy, iz), gridShape)`. It is up to
+    the user to ensure the batch does not run past the last cell. With the
+    default grid shape of `(1, 1, 1)`, the whole box is sampled uniformly.
+
+    If `checkMedium` is set, the source restricts the sampled positions to the
+    medium it emits into by querying the scene at each candidate position. If
+    none of the `maxAttempts` candidates lies inside the medium, the sample is
+    rejected and the tracer does not create a ray. The number of created rays
+    per cell can be retrieved via `rayCount`. Positions from which the query
+    hits no surface at all are rejected as well, unless `acceptLostRays` is set:
+    theia scenes have no medium of their own, so a medium extending to the
+    scene's bounding box without being enclosed by a surface (e.g. the world
+    volume of a GDML) can only be identified this way. The direction of the
+    query is reused as emission direction. This requires the medium to only
+    depend on the position, i.e. the geometry must either be closed, or be
+    surrounded by a single medium and `acceptLostRays` be set. Otherwise the
+    rejection depends on the direction, e.g. through an opening of the geometry,
+    and biases the emission. Checking the medium is only
+    supported by scene forward tracers.
+
+    Note
+    ----
+    Be careful when using `checkMedium` in combination with a `MultiScene`.
+    The medium check is performed against the main scene, so rays starting in
+    the volume of sub-scenes will use one of the enclosing portals for the
+    medium check. Please make sure that none of the portals has the given
+    mediumIdx on the surface that is facing the sub-scene.
+
+    Parameters
+    ----------
+    wavelengthSource: WavelengthSource
+        Source to sample wavelengths from.
+    mediumIdx: int
+        Index of the medium the light source emits into.
+    lower: (float, float, float), default=(0.0, 0.0, 0.0)
+        Lower corner of the box.
+    upper: (float, float, float), default=(1.0, 1.0, 1.0)
+        Upper corner of the box.
+    gridShape: (int, int, int), default=(1, 1, 1)
+        Number of cells along each axis.
+    raysPerCell: int, default=1
+        Number of consecutive rays sampled in each cell.
+    cellOffset: int, default=0
+        Flat index of the cell the first ray of a batch is sampled in.
+    autoAdvance: int | None, default=None
+        Amount `cellOffset` gets incremented with each update call, i.e. after
+        each batch. The first batch uses `cellOffset` as given. `None` disables
+        the advance.
+    timeRange: (float, float), default=(0.0, 100.0)
+        Start and stop time of the light source.
+    budget: float, default=1.0
+        Total amount of energy or photons the light source distributes among the
+        sampled photons per wavelength. Ignored if source emits particles.
+    emitParticles: bool, default=False
+        Whether to emit particles instead of rays. If so, `budget` will be
+        ignored.
+    checkMedium: bool, default=False
+        Whether to only create rays at positions inside the medium given by
+        `mediumIdx`.
+    maxAttempts: int, default=1
+        Max number of positions tried per sample if `checkMedium` is set.
+    acceptLostRays: bool, default=False
+        Whether to accept positions from which the medium query hits no surface
+        if `checkMedium` is set, i.e. the sampled ray from this position leaves 
+        the bounding box.
+    maxCellsPerBatch: int | None, default=None
+        Max number of cells a single batch covers, i.e. the size of the buffer
+        counting the created rays. Required if `checkMedium` is set.
+    """
+
+    name = "Voxel Light Source"
+
+    class LightParams(Structure):
+        _fields_ = [
+            ("lower", vec3),
+            ("mediumIdx", c_uint32),
+            ("_cellSize", vec3),
+            ("raysPerCell", c_uint32),
+            ("gridShape", uvec3),
+            ("cellOffset", c_uint32),
+            ("_countAdr", buffer_reference),
+            ("timeRange", vec2),
+            ("_contribFwd", c_float),
+        ]
+
+    def __init__(
+        self,
+        wavelengthSource: WavelengthSource,
+        *,
+        mediumIdx: int,
+        lower: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        upper: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        gridShape: tuple[int, int, int] = (1, 1, 1),
+        raysPerCell: int = 1,
+        cellOffset: int = 0,
+        autoAdvance: int | None = None,
+        timeRange: tuple[float, float] = (0.0, 100.0) * u.ns,
+        budget: float = 1.0,
+        emitParticles: bool = False,
+        checkMedium: bool = False,
+        maxAttempts: int = 1,
+        acceptLostRays: bool = False,
+        maxCellsPerBatch: int | None = None,
+    ) -> None:
+        if maxAttempts < 1:
+            raise ValueError("maxAttempts must be at least one")
+        if raysPerCell < 1:
+            raise ValueError("raysPerCell must be at least one")
+        if checkMedium and maxCellsPerBatch is None:
+            raise ValueError("maxCellsPerBatch is required if checkMedium is set")
+        # position (3) and direction (2) per attempt + time
+        nRNG = 5 * maxAttempts + 1 if checkMedium else 6
+        super().__init__(
+            nRNGForward=wavelengthSource.nRNGSamples + nRNG,
+            wavelengthSource=wavelengthSource,
+            params={"LightParams": VoxelLightSource.LightParams},
+            extra={"upper", "budget", "autoAdvance"},
+        )
+        if emitParticles and budget != 1.0:
+            warn("Cannot set budget: Light source emits particles")
+        # save params
+        self._emitParticles = emitParticles
+        self._budget = budget
+        self._upper = upper
+        self._autoAdvance = autoAdvance
+        self._checkMedium = checkMedium
+        self._maxAttempts = maxAttempts
+        self._acceptLostRays = acceptLostRays
+        self._maxCells = maxCellsPerBatch
+        # one counter buffer per configuration, mapped so it can be read directly
+        if checkMedium:
+            assert maxCellsPerBatch is not None
+            self._counts = [
+                hp.UnsignedIntTensor(maxCellsPerBatch, mapped=True) for _ in range(2)
+            ]
+            if not all(t.isMapped for t in self._counts):
+                raise RuntimeError("Could not create mapped tensor")
+        else:
+            self._counts = []
+        self.setParams(
+            lower=lower,
+            mediumIdx=mediumIdx,
+            gridShape=gridShape,
+            raysPerCell=raysPerCell,
+            cellOffset=cellOffset,
+            timeRange=timeRange,
+        )
+
+    @property
+    def autoAdvance(self) -> int | None:
+        """
+        Amount `cellOffset` gets incremented after each batch or `None` if
+        disabled.
+        """
+        return self._autoAdvance
+
+    @autoAdvance.setter
+    def autoAdvance(self, value: int | None) -> None:
+        self._autoAdvance = value
+
+    @property
+    def budget(self) -> float:
+        """
+        Total energy or amount of photons the light source distributes among all
+        sampled rays per wavelength. Ignored if source emits particles.
+        """
+        return self._budget
+
+    @budget.setter
+    def budget(self, value: float) -> None:
+        if self.emitsParticles:
+            warn("Cannot set budget: Light source emits particles")
+        self._budget = value
+
+    @property
+    def cellCount(self) -> int:
+        """Total number of cells in the grid"""
+        return int(np.prod(self.getParam("gridShape")))
+
+    @property
+    def checkMedium(self) -> bool:
+        """Whether only positions inside the medium create rays"""
+        return self._checkMedium
+
+    @property
+    def emitsParticles(self) -> bool:
+        """Whether this light source emits particles instead of light rays"""
+        return self._emitParticles
+
+    @property
+    def maxAttempts(self) -> int:
+        """Max number of positions tried per sample if the medium is checked"""
+        return self._maxAttempts
+
+    @property
+    def acceptLostRays(self) -> bool:
+        """
+        Whether positions from which the medium query hits no surface are
+        accepted
+        """
+        return self._acceptLostRays
+
+    @property
+    def maxCellsPerBatch(self) -> int | None:
+        """Max number of cells a single batch covers if the medium is checked"""
+        return self._maxCells
+
+    @property
+    def upper(self) -> tuple[float, float, float]:
+        """Upper corner of the box"""
+        return self._upper
+
+    @upper.setter
+    def upper(self, value: tuple[float, float, float]) -> None:
+        self._upper = value
+
+    @property
+    def forwardSourceCode(self) -> str:
+        preamble = createPreamble(
+            LIGHT_SOURCE_EMIT_PARTICLE=self.emitsParticles,
+            LIGHT_SOURCE_CHECK_MEDIUM=self.checkMedium,
+            LIGHT_SOURCE_MAX_ATTEMPTS=self.maxAttempts,
+            LIGHT_SOURCE_ACCEPT_LOST_RAYS=self.acceptLostRays,
+        )
+        return preamble + loadShader("lightsource/voxel/forward.glsl")
+
+    def rayCount(self, i: int) -> NDArray[np.uint32]:
+        """
+        Number of rays created per cell of the batch run using the i-th
+        configuration, i.e. element j counts the rays of cell `cellOffset + j`.
+        Only available if `checkMedium` is set. The returned array is a view
+        into the buffer and gets overwritten by the next batch using the same
+        configuration.
+        """
+        if not self.checkMedium:
+            raise RuntimeError("Rays are only counted if checkMedium is set")
+        assert self._maxCells is not None
+        tensor = self._counts[i]
+        return np.ctypeslib.as_array(
+            (c_uint32 * self._maxCells).from_address(tensor.memory)
+        )
+
+    def _finishParams(self, i: int) -> None:
+        super()._finishParams(i)
+        lower = np.asarray(self.getParam("lower"), dtype=np.float64)
+        upper = np.asarray(self.upper, dtype=np.float64)
+        shape = np.asarray(self.getParam("gridShape"), dtype=np.float64)
+        if np.any(upper <= lower):
+            raise ValueError("upper must be larger than lower in all dimensions")
+        self.setParam("_cellSize", tuple((upper - lower) / shape))
+        self.setParam("_contribFwd", self.budget)
+        if self.checkMedium:
+            self.setParam("_countAdr", self._counts[i].address)
+
+    def update(self, i: int) -> None:
+        super().update(i)
+        # advance after the current offset was written to the device, so the
+        # first batch uses the offset as given
+        if self.autoAdvance is not None:
+            offset = self.getParam("cellOffset")
+            self.setParam("cellOffset", offset + self.autoAdvance)
+
+    def run(self, i: int) -> list[hp.Command]:
+        if self.checkMedium:
+            return [hp.clearTensor(self._counts[i]), *super().run(i)]
+        return super().run(i)
 
 
 def frankTamm(

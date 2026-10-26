@@ -49,9 +49,9 @@ float acceptanceRate(float mu_i, float eta) {
 
     SurfaceHit hit = SurfaceHit(
         params.materialIdx, 0u, 0u, true,
-        vec3(0.0), nrm, vec3(0.0), nrm, rayDir, mat3(1.0)
+        vec3(0.0), nrm, 0.0, vec3(0.0), nrm, 0.0, rayDir, mat3(1.0)
     );
-    MicrofacetParams mfParams = prepare_microfacet(rayDir, hit);
+    MicrofacetParams mfParams = prepareMicrofacet(rayDir, hit);
 
     float acc = 0.0;
     for (int it = 0; it < N_THETA; it++) {
@@ -65,7 +65,7 @@ float acceptanceRate(float mu_i, float eta) {
         for (int ip = 0; ip < N_PHI; ip++) {
             float phi = (float(ip) + 0.5) * PI / float(N_PHI);
             vec3 h = vec3(st * cos(phi), st * sin(phi), ct);
-            float D = eval_microfacet_density(mfParams, h, hit, rayDir);
+            float D = evalMicrofacetDensity(mfParams, h, hit, rayDir);
             acc += D * roughFacetAcceptance(mfParams, rayDir, hit, eta, h) * weight;
         }
     }

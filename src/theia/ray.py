@@ -197,7 +197,7 @@ class UnpolarizedRay(RayModel):
             fields.append(("lin_contrib", c_float))
             fields.append(("log_contrib", c_float))
         if portal:
-            fields.append(("frame", c_int32 * 2))
+            fields.append(("frame", c_uint32 * 2))
         fields.append(("idx", c_uint32))  # path id: RNG stream + attribution
         fields.append(("dim", c_uint32))  # position in the RNG sequence
         fields.append(("pathLength", c_uint32))  # iterations done so far

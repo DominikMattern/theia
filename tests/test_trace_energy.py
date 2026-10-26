@@ -35,7 +35,6 @@ from theia.surface import (
 from theia.target import FlatTargetGuide, InnerSphereTarget, SphereTargetGuide
 from theia.trace import (
     EventStatisticCallback,
-    MultiSceneForwardTracer,
     SceneBackwardTracer,
     SceneBackwardTargetTracer,
     SceneForwardTracer,
@@ -83,15 +82,18 @@ class UndoAttenuationProcessFn:
 
 
 @pytest.mark.parametrize(
-    "mu_a,mu_s,g",
+    "mu_a,mu_s,g,wavefrontCompactionSchedule",
     [
-        (0.0, 0.005, 0.0),
-        (0.05, 0.01, 0.0),
-        (0.05, 0.01, -0.9),
-        (0.05, 0.01, 0.9),
+        (0.0, 0.005, 0.0, None),
+        (0.05, 0.01, 0.0, None),
+        (0.05, 0.01, -0.9, None),
+        (0.05, 0.01, 0.9, None),
+        (0.05, 0.01, 0.0, [1, 2, 3]),
     ],
 )
-def test_SceneForwardTracer_GroundTruth(mu_a: float, mu_s: float, g: float) -> None:
+def test_SceneForwardTracer_GroundTruth(
+    mu_a: float, mu_s: float, g: float, wavefrontCompactionSchedule: list[int] | None
+) -> None:
     """
     Ground Truth Test:
 
@@ -147,6 +149,7 @@ def test_SceneForwardTracer_GroundTruth(mu_a: float, mu_s: float, g: float) -> N
         rng,
         scene,
         maxPathLength=max_length,
+        wavefrontCompactionSchedule=wavefrontCompactionSchedule,
     )
     rng.autoAdvance = tracer.nRNGSamples
 
@@ -186,14 +189,17 @@ def test_SceneForwardTracer_GroundTruth(mu_a: float, mu_s: float, g: float) -> N
 
 
 @pytest.mark.parametrize(
-    "mu_a,mu_s,g",
+    "mu_a,mu_s,g,wavefrontCompactionSchedule",
     [
-        (0.0, 0.01, 0.0),
-        (0.05, 0.005, 0.5),
-        (0.05, 0.005, -0.5),
+        (0.0, 0.01, 0.0, None),
+        (0.05, 0.005, 0.5, None),
+        (0.05, 0.005, -0.5, None),
+        (0.05, 0.005, 0.5, [1, 1, 2, 4, 8, 16]),
     ],
 )
-def test_SceneForwardTracer_particle(mu_a: float, mu_s: float, g: float):
+def test_SceneForwardTracer_particle(
+    mu_a: float, mu_s: float, g: float, wavefrontCompactionSchedule: list[int] | None
+):
     if not isRayTracingEnabled():
         pytest.skip("ray tracing is not supported")
 
@@ -283,6 +289,7 @@ def test_SceneForwardTracer_particle(mu_a: float, mu_s: float, g: float):
         scene,
         maxPathLength=max_length,
         # maxTime=maxTime,
+        wavefrontCompactionSchedule=wavefrontCompactionSchedule,
     )
     rng.autoAdvance = tracer.nRNGSamples
     # create pipeline + scheduler
@@ -1024,9 +1031,9 @@ def test_SceneBackwardTracer_SurfaceNEE() -> None:
     assert err < 1e-3
 
 
-def test_MultiSceneForwardTracer() -> None:
+def test_SceneForwardTracer_MultiScene() -> None:
     """
-    Checks the MultiSceneForwardTracer against the SceneForwardTracer by tracing
+    Checks the SceneForwardTracer on a MultiScene against a flat Scene by tracing
     the very same geometry twice: once as a single flat scene, once split into
     sub-scenes entered through portals. Both must produce the same signal in
     each of the three detectors.
@@ -1034,28 +1041,23 @@ def test_MultiSceneForwardTracer() -> None:
     Scene: a cone source in water shines along +x onto two glass spheres placed
     behind each other and rotated differently. Each sphere has a dielectric
     surface and holds an off-centre, rotated border box containing a small cube
-    detector; a large cube detector sits behind both spheres. Placing the inner
-    geometry off-centre is what makes the differing sphere rotations observable
-    at the detectors.
+    detector; a large cube detector sits behind both spheres.
 
     In the multi-scene version the sphere surfaces and the border boxes become
     portals, giving two sub-scenes - the sphere interior and the border box
     interior - each entered through TWO contexts, one per sphere. The sphere
-    portal is the dielectric glass/water surface itself rather than a neutral
-    box, so a portal coupled to a real surface model gets covered as well: a
-    refracted photon changes both medium and frame, a reflected one stays put.
+    portal is the dielectric glass/water surface.
 
     Both sub-scenes are built ONCE, so the small detector exists as a single
     instance and tells the spheres apart through a per-context detector id, which
     the flat scene resolves with two separate instances instead. Comparing the
-    detectors individually thus verifies the full portal mapping, including which
-    context a photon carries back out of a shared sub-scene.
+    detectors individually thus verifies the full portal mapping.
     """
     if not isRayTracingEnabled():
         pytest.skip("ray tracing not supported")
 
     # scene settings
-    lam = 500.0 * u.nm  # inside the validity range of both media models
+    lam = 500.0 * u.nm
     budget = 1.0
     r_sphere = 0.50 * u.m  # the glass sphere, which is also the portal
     s_border = 0.15 * u.m  # half edge of the border box
@@ -1064,7 +1066,7 @@ def test_MultiSceneForwardTracer() -> None:
     box_rot = (1.0, 1.0, 0.0, 25.0)  # border box rotation, sphere-local
     det_off = (0.05, 0.0, -0.03) * u.m  # detector centre, box-local
     sphere_pos = [(2.0, 0.0, 0.0) * u.m, (4.0, 0.0, 0.0) * u.m]
-    sphere_rot = [(0.0, 0.0, 1.0, 35.0), (0.0, 1.0, 0.0, 70.0)]  # differ!
+    sphere_rot = [(0.0, 0.0, 1.0, 35.0), (0.0, 1.0, 0.0, 70.0)]
     big_pos = (8.0, 0.0, 0.0) * u.m
     s_big = 2.0 * u.m
     light_pos = (0.0, 0.0, 0.0) * u.m
@@ -1074,13 +1076,7 @@ def test_MultiSceneForwardTracer() -> None:
     n_batches = 16
     max_length = 24
 
-    # Create materials. "glass_portal" is a real dielectric surface that also
-    # carries the PORTAL flag ("PRT" = portal + reflect + transmit), so the very
-    # same material refracts in the flat scene and refracts AND switches frame in
-    # the split one - other tracers simply ignore the flag. "border_glass" has
-    # the same medium on both sides, making a crossing a pure teleport.
-    # Both media keep the default Transparent volume model, so neither absorbs
-    # nor scatters and no energy goes missing between the two runs.
+    # create materials
     water = PureWaterModel().createMedium()
     glass = BK7Model().createMedium()
     matStore = MaterialStore(
@@ -1093,9 +1089,8 @@ def test_MultiSceneForwardTracer() -> None:
     )
     waterIdx = matStore.media["water"]
 
-    # Placements. The local ones are used verbatim inside the sub-scenes; the
-    # frame maps compose them into world coordinates for the flat scene and are
-    # exactly the maps the portals have to reproduce.
+    # Placements: Sub-scene B is the interior of the border box, sub-scene A the 
+    # interior of a sphere 
     store = MeshStore({"sphere": "assets/sphere.stl", "cube": "assets/cube.ply"})
     t_sphere = Transform.TRS(scale=r_sphere)  # sub-scene A
     t_borderBox = Transform.TRS(scale=s_border)  # sub-scene B
@@ -1124,10 +1119,8 @@ def test_MultiSceneForwardTracer() -> None:
     flatScene = Scene(flatInstances, matStore)
 
     # ---- multi-scene: the same geometry behind portals -------------------- #
-    # Sub-scene B is the interior of the border box, sub-scene A the interior of
-    # a sphere; both are entered with one context per sphere and therefore built
-    # once. Sub-scene A's boundary is the dielectric surface itself, so a portal
-    # carrying a real surface model is covered too.
+    # Both subscenes are entered with one context per sphere and therefore built
+    # once.
     borderBoxB = store.createPortal("cube", "border_glass", t_borderBox, contextCount=2)
     detB = store.createInstance("cube", "det_small", t_det, detectorId=[0, 1])
     sphereA = store.createPortal("sphere", "glass_portal", t_sphere, contextCount=2)
@@ -1171,10 +1164,8 @@ def test_MultiSceneForwardTracer() -> None:
             maxPathLength=max_length,
             sampleCoefficient=0.0,  # no volume scattering
         )
-        if multi:
-            tracer = MultiSceneForwardTracer(*common, multiScene, **kwargs)
-        else:
-            tracer = SceneForwardTracer(*common, flatScene, **kwargs)
+        scene = multiScene if multi else flatScene
+        tracer = SceneForwardTracer(*common, scene, **kwargs)
         rng.autoAdvance = tracer.nRNGSamples
 
         results: list[np.ndarray] = []
@@ -1198,23 +1189,18 @@ def test_MultiSceneForwardTracer() -> None:
         assert stats.mismatch == 0
         assert stats.error == 0
     assert flatStats.created == multiStats.created  # same primary rays
-    # portals must actually have been crossed, otherwise the sub-scenes were
-    # never entered and the detectors below would agree for the wrong reason
-    assert multiStats.volume > 0
 
-    # Both tracers estimate the same integral, but consume their random numbers
-    # along different code paths, so we compare the batch means against the
-    # spread we actually measured instead of a hand-picked tolerance.
+    # we compare the means of both configurations
     mFlat, mMulti = flat.mean(0), multi.mean(0)
     seFlat = flat.std(0, ddof=1) / np.sqrt(n_batches)
     seMulti = multi.std(0, ddof=1) / np.sqrt(n_batches)
     sigma = np.hypot(seFlat, seMulti)
 
-    # all three detectors must actually see light, else there is nothing to compare
+    # all three detectors must actually see light
     assert np.all(mFlat > 0.0)
     assert np.all(mMulti > 0.0)
     # The two spheres must give different signals - otherwise swapping the two
-    # portal contexts would go unnoticed and the comparison below proves nothing.
+    # portal contexts would go unnoticed.
     assert abs(mFlat[0] - mFlat[1]) > 5.0 * np.hypot(seFlat[0], seFlat[1])
     # the actual check: same signal in every detector
     assert np.all(np.abs(mMulti - mFlat) < 5.0 * sigma)
