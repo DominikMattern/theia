@@ -260,17 +260,17 @@ class DielectricRoughSurface(SurfaceModel, name="dielectric_rough"):
             )
         self._model = model
 
-        # Worst-case RNG draws for prepareSurface. The facet loop runs 21 times,
+        # Worst-case RNG calls for prepareSurface. The facet loop runs 21 times,
         # the last one being the fall-back, which draws no facet. The normal
-        # sampler draws 2, except "gaussian" (and hence "unified") which
-        # rejection-samples the facet angle (up to 4 attempts x 2 draws) plus 1
-        # for the azimuth.
-        sampler = 9 if model in ("gaussian", "unified") else 2
+        # sampler calls the RNG once, except "gaussian" (and hence "unified")
+        # which rejection-samples the facet angle (up to 4 attempts) plus 1 for
+        # the azimuth.
+        sampler = 5 if model in ("gaussian", "unified") else 1
         if model == "unified":
-            #   2 (pre-sampled diffuse direction)
+            #   1 (pre-sampled diffuse direction)
             # + 20 * (normal + Fresnel coin + lobe choice)
             # + 2 (the fall-back still draws coin and lobe)
-            prepare = 2 + 20 * (sampler + 2) + 2
+            prepare = 1 + 20 * (sampler + 2) + 2
         else:
             # one uniform per iteration decides channel and acceptance at once
             prepare = 20 * (sampler + 1) + 1
