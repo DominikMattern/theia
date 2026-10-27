@@ -23,12 +23,14 @@ import theia.units as u
 
 
 __all__ = [
+    "BackwardLightMISSampler",
     "BackwardLightSampler",
     "CameraDirectSampler",
     "LightSourceTargetSampler",
     "SurfaceInteractionSampler",
     "TargetSampler",
     "VolumeInteractionSampler",
+    "VolumeNeeStepSizeSampler",
     "VolumeScatteringSampler",
 ]
 
@@ -137,6 +139,197 @@ class BackwardLightSampler(PipelineStage):
             **materials.header,
         }
         code = compileShader("lightsource/sample/backward.glsl", preamble, headers)
+        self._program = hp.Program(code)
+        # bind memory
+        materials.bindParams(self._program)
+
+    @property
+    def batchSize(self) -> int:
+        """Number of samples to draw per batch"""
+        return self.getParam("_count")
+
+    @property
+    def materials(self) -> MaterialStore:
+        """Optional material store in use"""
+        return self._materials
+
+    @property
+    def medium(self) -> int:
+        """Index of the medium the light source is submerged in"""
+        return self.getParam("_medium")
+
+    @medium.setter
+    def medium(self, value: str | int | None) -> None:
+        if self._materials is None and value is not None:
+            raise ValueError("Cannot set material if none were provide!")
+        if value is None:
+            value = VACUUM_IDX
+        elif isinstance(value, str):
+            assert self._materials is not None  # to make the linter happy...
+            value = self._materials.media[value]
+        self.setParam("_mediumIdx", value)
+
+    @property
+    def queue(self) -> IOQueue:
+        """Queue holding the sampled light rays"""
+        return self._queue
+
+    @property
+    def rayModel(self) -> RayModel:
+        """Ray model used for sampling"""
+        return self._ray
+
+    @property
+    def rng(self) -> RNG:
+        """Generator for creating random numbers"""
+        return self._rng
+
+    @property
+    def source(self) -> LightSource:
+        """Source generating light rays"""
+        return self._source
+
+    @property
+    def wavelengthSource(self) -> WavelengthSource:
+        """Source from which wavelengths are sampled"""
+        return self._photons
+
+    def collectStages(self) -> list[PipelineStage]:
+        """
+        Returns a list of all stages involved with this sampler in the correct
+        order suitable for creating a pipeline.
+        """
+        return [self.rng, self.wavelengthSource, self.source, self]
+
+    def run(self, i: int) -> list[hp.Command]:
+        for stage in self.collectStages():
+            stage.bindParams(self._program, i)
+        groups = -(self.batchSize // -512)
+        return [
+            self._program.dispatch(groups),
+            *self.queue.run(i),
+        ]
+
+
+class BackwardLightMISSampler(PipelineStage):
+    """
+    Samples the given light source in backward mode for MIS NEE contributions.
+    Starting from a possibly random ray, the light source is queried to propose
+    a step size to create an alternate scattering point for the NEE as well as
+    a light ray pointing to said scattering point.
+
+    Parameters
+    ----------
+    batchSize: int
+        Number of rays to sample per run
+    source: LightSource
+        Light source to sampler
+    ray: RayModel
+        Ray model to use
+    rng: RNG
+        Random number generator
+    materials: MaterialStore | None, default = None
+        Optional material store containing required medium properties.
+    medium: str | int | None, default = None
+        Medium from which to sample the light source. Can be specified by either
+        its index or its name. Defaults to vacuum if `None`.
+    origin: (float, float, float) | None, default=None
+        Optional fixed ray origin. If `None`, a random ray origin for each
+        sample will be drawn.
+    direction: (float, float, float) | None, default=None
+        Optional fixed ray direction. If `None`, a random ray direction for each
+        sample will be drawn.
+    boxSize: float, default=100.0m
+        Side length of the cube centered at the origin used to sample the target
+        position delegated to the light source.
+    maxStep: float, default=50.0m
+        Upper limit on the step size the light source may propose.
+    """
+
+    class SamplerParams(Structure):
+        _fields_ = [
+            ("_queueAdr", buffer_reference),
+            ("_count", c_uint32),
+            ("_mediumIdx", c_uint32),
+            ("origin", vec3),
+            ("direction", vec3),
+            ("maxStep", c_float),
+        ]
+
+    def __init__(
+        self,
+        batchSize: int,
+        source: LightSource,
+        ray: RayModel,
+        wavelengthSource: WavelengthSource,
+        *,
+        rng: RNG,
+        materials: MaterialStore | None = None,
+        medium: str | int | None = None,
+        origin: tuple[float, float, float] | None = None,
+        direction: tuple[float, float, float] | None = None,
+        boxSize: float = 100.0 * u.m,
+        maxStep: float = 50.0 * u.m,
+    ) -> None:
+        super().__init__(
+            {"SamplerParams": BackwardLightMISSampler.SamplerParams},
+            {"medium"},
+        )
+        # check params
+        if source.backwardSourceCode is None:
+            raise ValueError("Light source does not support backward mode")
+        # process params
+        if isinstance(medium, str):
+            if materials is None:
+                raise ValueError("Medium cannot be locked up if no store is provided")
+            medium = materials.media[medium]
+        elif medium is None:
+            medium = VACUUM_IDX
+        if materials is None:
+            materials = MaterialStore([], mediaSlots=ray.requiredMediumProperties)
+        if origin is None:
+            origin = (float("NaN"), float("NaN"), float("NaN"))
+        if direction is None:
+            direction = (float("NaN"), float("NaN"), float("NaN"))
+
+        # allocate queue
+        resultFields = [
+            ("origin", c_float * 3),
+            ("direction", c_float * 3),
+            ("wavelength", c_float),
+            ("tSampled", c_float),
+            ("tStep", c_float),
+            ("residualProb", c_float),
+        ]
+        resultFields.extend([(n + "Ray", t) for n, t in ray.forwardItem._fields_])
+        item = createCType("Item", resultFields)
+        self._queue = IOQueue(item, batchSize, mode="retrieve", skipCounter=True)
+        assert self._queue.tensor is not None
+        # save params
+        self._ray = ray
+        self._rng = rng
+        self._source = source
+        self._materials = materials
+        self._photons = wavelengthSource
+        self.setParams(
+            _queueAdr=self._queue.tensor.address,
+            _count=batchSize,
+            _mediumIdx=medium,
+            origin=origin,
+            direction=direction,
+            maxStep=maxStep,
+        )
+
+        # create program
+        preamble = createPreamble(DIM=0.5 * boxSize)
+        headers = {
+            "ray.glsl": ray.sourceCode,
+            "rng.glsl": rng.sourceCode,
+            "source.glsl": source.backwardSourceCode,
+            "photon.glsl": wavelengthSource.sourceCode,
+            **materials.header,
+        }
+        code = compileShader("lightsource/sample/mis.glsl", preamble, headers)
         self._program = hp.Program(code)
         # bind memory
         materials.bindParams(self._program)
@@ -1338,6 +1531,165 @@ class VolumeScatteringSampler(PipelineStage):
             **materials.header,
         }
         code = compileShader("volume/sample/scatter.glsl", preamble, headers)
+        self._program = hp.Program(code)
+        materials.bindParams(self._program)
+
+    @property
+    def batchSize(self) -> int:
+        """Number of samples to draw per run"""
+        return self._queueSize
+
+    @property
+    def materials(self) -> MaterialStore:
+        """Store containing materials to use"""
+        return self._materials
+
+    @property
+    def queue(self) -> IOQueue:
+        """Queue containing samples"""
+        return self._queue
+
+    @property
+    def rayModel(self) -> RayModel:
+        """Model describing rays"""
+        return self._ray
+
+    @property
+    def rng(self) -> RNG:
+        """Random number generator"""
+        return self._rng
+
+    @property
+    def source(self) -> Camera | LightSource:
+        """Source producing rays"""
+        return self._source
+
+    @property
+    def wavelengthSource(self) -> WavelengthSource | None:
+        "Optional wavelength source for use with cameras"
+        return self._photons
+
+    def collectStages(self) -> list[PipelineStage]:
+        """
+        Returns a list of all stages involved with this sampler in the correct
+        order suitable for creating a pipeline.
+        """
+        if self._photons is None:
+            return [self.rng, self.source, self]
+        else:
+            return [self.rng, self._photons, self.source, self]
+
+    def run(self, i: int) -> list[hp.Command]:
+        for stage in self.collectStages():
+            stage.bindParams(self._program, i)
+        groups = -(self.batchSize // -512)
+        return [
+            self._program.dispatch(groups),
+            *self._queue.run(i),
+        ]
+
+
+class VolumeNeeStepSizeSampler(PipelineStage):
+    """
+    Samples and evaluates the volume model's proposed NEE step size used for MIS
+
+    Parameters
+    ----------
+    batchSize: int
+        Number of samples to draw per run
+    ray: RayModel
+        Model describing the ray
+    volume: VolumeModel
+        Volume model to be sampled
+    materials: MaterialStore
+        Store containing material data
+    rng: RNG
+        Random number generator
+    source: LightSource | Camera
+        Source producing rays
+    wavelengthSource: WavelengthSource | None, default=None
+        Sampler for wavelengths to be used with camera
+    maxStep: float, default=50.0m
+        Upper limit on sampled step size
+    """
+
+    class SamplerParams(Structure):
+        _fields_ = [
+            ("_queueAdr", buffer_reference),
+            ("_queueSize", c_uint32),
+            ("maxStep", c_float),
+        ]
+
+    def __init__(
+        self,
+        batchSize: int,
+        ray: RayModel,
+        volume: VolumeModel,
+        materials: MaterialStore,
+        rng: RNG,
+        source: LightSource | Camera,
+        wavelengthSource: WavelengthSource | None = None,
+        *,
+        maxStep: float = 50.0 * u.m,
+    ) -> None:
+        super().__init__({"SamplerParams": VolumeNeeStepSizeSampler.SamplerParams})
+        self._ray = ray
+        self._volume = volume
+        self._materials = materials
+        self._rng = rng
+        self._source = source
+        self._photons = wavelengthSource
+
+        forward = isinstance(source, LightSource)
+        if forward and wavelengthSource is not None:
+            raise ValueError("wavelength source can only be specified in backward mode")
+        if forward and source.forwardSourceCode is None:
+            raise ValueError("light source does not support forward mode")
+        if forward:
+            source_code = source.forwardSourceCode
+            self._photons = source.wavelengthSource
+        else:
+            source_code = source.sourceCode
+        mode = "forward" if forward else "backward"
+        rayItem = ray.forwardItem if forward else ray.backwardItem
+        if rayItem is None:
+            raise ValueError(f"Ray model does not support {mode} mode")
+        volCode = volume.forwardSourceCode if forward else volume.backwardSourceCode
+        if volCode is None:
+            raise ValueError(f"Volume model does not support {mode} mode")
+        if not volume.supportsNEE:
+            raise ValueError(f"Volume model does not support NEE sampling!")
+
+        fields = [
+            *[(name + "Ray", t) for name, t in rayItem._fields_],
+            ("sampledStep", c_float),
+            ("sampledProb", c_float),
+            ("evalStep", c_float),
+            ("evalProb", c_float),
+        ]
+        item = createCType("Item", fields)
+        self._queue = IOQueue(item, batchSize, mode="retrieve", skipCounter=True)
+        assert self._queue.tensor is not None
+
+        self.setParams(
+            _queueAdr=self._queue.tensor.address,
+            _queueSize=batchSize,
+            maxStep=maxStep,
+        )
+
+        preamble = createPreamble(
+            RAY_FIELD_COUNT=sizeof(rayItem) // 4,
+            SAMPLE_FORWARD=forward,
+        )
+        headers = {
+            "ray.glsl": ray.sourceCode,
+            "rng.glsl": rng.sourceCode,
+            "source.glsl": source_code,
+            "photon.glsl": "" if self._photons is None else self._photons.sourceCode,
+            "volume.glsl": volCode,
+            **materials.header,
+        }
+        code = compileShader("volume/sample/nee.glsl", preamble, headers)
         self._program = hp.Program(code)
         materials.bindParams(self._program)
 

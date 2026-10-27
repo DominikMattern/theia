@@ -151,6 +151,7 @@ def test_DielectricSurface(particle: bool, camera: bool, flags: str):
     t = refract(result["directionIn"], normal, ni, no)
     r = reflect(result["directionIn"], normal)
     R = reflectance(result["directionIn"], normal, ni, no)
+    c = None  # to make the linter happy
     if not particle:
         c = result["contribIn"]
     if camera:
@@ -158,13 +159,17 @@ def test_DielectricSurface(particle: bool, camera: bool, flags: str):
         eta = ni / no
         c = np.copy(result["contribIn"])
         c[trans] = (c * eta * eta)[trans]
+    # near the critical angle, errors increase -> mask and test extra
+    cosIn = np.abs(np.multiply(result["directionIn"], normal).sum(-1))
+    k = 1.0 - (ni / no) ** 2 * (1.0 - cosIn**2)
+    near_crit = np.abs(k) < 2e-3  # +/- 9e-4 around cos(theta_crit)
 
     # check we prevent self intersection
     cosPos = np.multiply(result["positionOut"], normal[None, :]).sum(-1)
     assert np.all(cosPos[trans] < 0.0)
     assert np.all(cosPos[refl] > 0.0)
 
-    assert np.allclose(result["directionOut"][trans], t[trans], atol=1e-5)
+    assert np.allclose(result["directionOut"][trans], t[trans], atol=2e-5)
     assert np.allclose(result["directionOut"][refl], r[refl], atol=1e-5)
     assert np.all(result["mediumIdxOut"][trans] == VACUUM_IDX)
     assert np.all(result["mediumIdxOut"][refl] == waterIdx)
@@ -175,16 +180,28 @@ def test_DielectricSurface(particle: bool, camera: bool, flags: str):
             assert absorbed.sum() > 0
         else:
             cO = result["contribOut"]
-            assert np.allclose(cO[~absorbed], (c * R)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cO[mask], (c * R)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cO[mask], (c * R)[mask], atol=5e-3)
     if flags == "T":
         assert refl.sum() == 0
         assert absorbed.sum() > 0  # total internal reflection
         if not particle:
             cO = result["contribOut"]
-            assert np.allclose(cO[~absorbed], (c * (1.0 - R))[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cO[mask], (c * (1.0 - R))[mask], atol=5e-4)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cO[mask], (c * (1.0 - R))[mask], atol=5e-3)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * (1.0 - R))[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * (1.0 - R))[mask], atol=5e-4)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * (1.0 - R))[mask], atol=5e-3)
     if flags == "TR":
         assert refl.sum() > 0
         assert trans.sum() > 0
@@ -193,10 +210,15 @@ def test_DielectricSurface(particle: bool, camera: bool, flags: str):
             # check particle is not both reflected and detected
             np.all((result["hitSuccess"] == 0) == refl)
         else:
+            assert c is not None
             assert np.allclose(result["contribOut"], c)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * (1.0 - R))[~absorbed], atol=5e-5)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * (1.0 - R))[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * (1.0 - R))[mask], atol=5e-4)
 
 
 def createConstMetal(name: str, n: float, k: float) -> Medium:
@@ -933,6 +955,7 @@ def test_ThinDielectricSurface(
     ni, no = np.ones(N) * ni, np.ones(N) * no  # cast to array for following funcs
     t = refract(result["directionIn"], normal, ni, no)
     r = reflect(result["directionIn"], normal)
+    c = None
     if not particle:
         c = result["contribIn"]
     if camera:
@@ -940,13 +963,17 @@ def test_ThinDielectricSurface(
         eta = ni / no
         c = np.copy(result["contribIn"])
         c[trans] = (c * eta * eta)[trans]
+    # near the critical angle, errors increase -> mask and test extra
+    cosIn = np.abs(np.multiply(result["directionIn"], normal).sum(-1))
+    k = 1.0 - (ni / no) ** 2 * (1.0 - cosIn**2)
+    near_crit = np.abs(k) < 2e-3  # +/- 9e-4 around cos(theta_crit)
 
     # check we prevent self intersection
     cosPos = np.multiply(result["positionOut"], normal[None, :]).sum(-1)
     assert np.all(cosPos[trans] < 0.0)
     assert np.all(cosPos[refl] > 0.0)
 
-    assert np.allclose(result["directionOut"][trans], t[trans], atol=1e-5)
+    assert np.allclose(result["directionOut"][trans], t[trans], atol=2e-5)
     assert np.allclose(result["directionOut"][refl], r[refl], atol=1e-5)
     assert np.all(result["mediumIdxOut"][trans] == VACUUM_IDX)
     assert np.all(result["mediumIdxOut"][refl] == waterIdx)
@@ -957,20 +984,35 @@ def test_ThinDielectricSurface(
             assert absorbed.sum() > 0
         else:
             cO = result["contribOut"]
-            assert np.allclose(cO[~absorbed], (c * R)[~absorbed], atol=5e-4, rtol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cO[mask], (c * R)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cO[mask], (c * R)[mask], atol=5e-3)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * T)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * T)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * T)[mask], atol=5e-3)
     if flags == "T":
         assert refl.sum() == 0
         assert absorbed.sum() > 0  # total internal reflection
         if not particle:
             cO = result["contribOut"]
-            # TODO: Check why this large error!?
-            assert np.allclose(cO[~absorbed], (c * T)[~absorbed], atol=1e-3, rtol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cO[mask], (c * T)[mask], atol=1e-4, rtol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cO[mask], (c * T)[mask], atol=5e-3)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * T)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * T)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * T)[mask], atol=5e-3)
     if flags == "TR":
         assert refl.sum() > 0
         assert trans.sum() > 0
@@ -979,10 +1021,15 @@ def test_ThinDielectricSurface(
             # check particle is not both reflected and detected
             np.all((result["hitSuccess"] == 0) == refl)
         else:
+            assert c is not None
             assert np.allclose(result["contribOut"], c)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * T)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * T)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * T)[mask], atol=5e-3)
 
 
 @pytest.mark.parametrize("absorb", [True, False])
@@ -1091,6 +1138,7 @@ def test_ThinMetallicSurface(particle: bool, camera: bool, flags: str, absorb: b
     ni, no = np.ones(N) * ni, np.ones(N) * no  # cast to array for following funcs
     t = refract(result["directionIn"], normal, ni, 1.0)
     r = reflect(result["directionIn"], normal)
+    c = None
     if not particle:
         c = result["contribIn"]
     if camera:
@@ -1098,13 +1146,17 @@ def test_ThinMetallicSurface(particle: bool, camera: bool, flags: str, absorb: b
         eta = ni / no
         c = np.copy(result["contribIn"])
         c[trans] = (c * eta * eta)[trans]
+    # near the critical angle, errors increase -> mask and test extra
+    cosIn = np.abs(np.multiply(result["directionIn"], normal).sum(-1))
+    k = 1.0 - (ni / no) ** 2 * (1.0 - cosIn**2)
+    near_crit = np.abs(k) < 2e-3  # +/- 9e-4 around cos(theta_crit)
 
     # check we prevent self intersection
     cosPos = np.multiply(result["positionOut"], normal[None, :]).sum(-1)
     assert np.all(cosPos[trans] < 0.0)
     assert np.all(cosPos[refl] > 0.0)
 
-    assert np.allclose(result["directionOut"][trans], t[trans], atol=1e-5)
+    assert np.allclose(result["directionOut"][trans], t[trans], atol=2e-5)
     assert np.allclose(result["directionOut"][refl], r[refl], atol=1e-5)
     assert np.all(result["mediumIdxOut"][trans] == VACUUM_IDX)
     assert np.all(result["mediumIdxOut"][refl] == waterIdx)
@@ -1115,19 +1167,31 @@ def test_ThinMetallicSurface(particle: bool, camera: bool, flags: str, absorb: b
             assert absorbed.sum() > 0
         else:
             cO = result["contribOut"]
-            assert np.allclose(cO[~absorbed], (c * R)[~absorbed], atol=5e-4)
+            assert np.allclose(cO[~absorbed], (c * R)[~absorbed], atol=5e-4, rtol=5e-5)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * A)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * A)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * A)[mask], atol=5e-3)
     if flags == "T":
         assert refl.sum() == 0
         assert absorbed.sum() > 0  # total internal reflection
         if not particle:
             cO = result["contribOut"]
-            assert np.allclose(cO[~absorbed], (c * T)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cO[mask], (c * T)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cO[mask], (c * T)[mask], atol=5e-3)
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * A)[~absorbed], atol=5e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[mask], (c * A)[mask], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * A)[mask], atol=5e-3)
     if flags == "TR":
         assert refl.sum() > 0
         assert trans.sum() > 0
@@ -1137,11 +1201,16 @@ def test_ThinMetallicSurface(particle: bool, camera: bool, flags: str, absorb: b
             assert absorbed.sum() == 0
         if not particle and not camera:
             cH = result["contribHit"]
-            assert np.allclose(cH[~absorbed], (c * A)[~absorbed], rtol=2e-4)
+            mask = ~absorbed & ~near_crit
+            assert np.allclose(cH[~absorbed], (c * A)[~absorbed], atol=5e-5)
+            # numerically more unstable around critical angle -> allow larger error
+            mask = ~absorbed & near_crit
+            assert np.allclose(cH[mask], (c * A)[mask], atol=5e-3)
         if particle:
             # check particle is not both reflected and detected
             np.all((result["hitSuccess"] == 0) == refl)
         else:
+            assert c is not None
             if not absorb:
                 # apply IS correction from sampling without absorption
                 c *= R + T

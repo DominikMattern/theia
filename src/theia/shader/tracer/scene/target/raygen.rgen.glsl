@@ -42,7 +42,33 @@ ResultCode trace(
     traceData.ray = ray;
     traceData.idx = idx;
     traceData.dim = dim;
-    //trace
+    //trace and optionally, reorder
+    #ifdef TRACER_REORDER_THREADS
+    //in theory one could also give special hints for reordering or aborting
+    //tracing before executing miss and hit shaders, but the effect on performance
+    //was minimal, so we skip that for now
+    hitObjectEXT hitObj;
+    hitObjectTraceReorderExecuteEXT(
+        hitObj,
+        #ifdef RAY_PORTAL
+        //main TLAS or the photon's current sub-scene TLAS (local frame)
+        accelerationStructureEXT(portalSelectTlas(ray.frame, params.tlas)),
+        #else
+        accelerationStructureEXT(params.tlas),
+        #endif
+        gl_RayFlagsOpaqueEXT,                   //ray flags
+        0xFF,                                   //cull mask
+        0,                                      //sbt offset
+        0,                                      //sbt stride
+        getVolumeIdx(ray.mediumIdx) + 1,        //miss index
+        ray.position,                           //origin
+        0.0,                                    //t_min
+        ray.direction,                          //direction
+        dist,                                   //t_max
+        0                                       //payload location
+    );
+    #else
+    //trace without reorder
     traceRayEXT(
         #ifdef RAY_PORTAL
         //main TLAS or the photon's current sub-scene TLAS (local frame)
@@ -61,6 +87,7 @@ ResultCode trace(
         dist,                                   //t_max
         0                                       //payload location
     );
+    #endif
     //read back result
     ray = traceData.ray;
     // dim = traceData.dim;

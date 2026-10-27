@@ -5,7 +5,12 @@ import hephaistos as hp
 
 from functools import cache
 
-from theia.device import getEnabledAtomics, getEnabledFma, getEnabledRayTracingFeatures
+from theia.device import (
+    getEnabledAtomics,
+    getEnabledFloatControl,
+    getEnabledFma,
+    getEnabledRayTracingFeatures,
+)
 
 from collections.abc import Iterable
 from importlib.resources.abc import Traversable
@@ -100,6 +105,18 @@ def getPreamble() -> str:
         preamble += "#define _FLT_FMA_32 1\n"
     if fma.float64:
         preamble += "#define _FLT_FMA_64 1\n"
+    # set float execution mode if supported
+    floatControl = getEnabledFloatControl()
+    if floatControl.signedZeroInfNanPreserveFloat32:
+        preamble += "spirv_execution_mode(capabilities = [4466], 4461, 32);\n"
+    if floatControl.roundingModeRTEFloat32:
+        preamble += "spirv_execution_mode(capabilities = [4467], 4462, 32);\n"
+        if floatControl.roundingModeIndependence == hp.FloatControlIndependence.NONE:
+            # need to set the other two rounding modes as well
+            if floatControl.roundingModeRTEFloat16:
+                preamble += "spirv_execution_mode(capabilities = [4467], 4462, 16);\n"
+            if floatControl.roundingModeRTEFloat64:
+                preamble += "spirv_execution_mode(capabilities = [4467], 4462, 64);\n"
     # enable supported atomics
     atomics = getEnabledAtomics()
     if hp.Atomics.BufferFloat64Add in atomics:
@@ -116,6 +133,8 @@ def getPreamble() -> str:
     if rt_features.positionFetch:
         preamble += "#extension GL_EXT_ray_tracing_position_fetch : require\n"
         preamble += "#define POSITION_FETCH_ENABLED 1\n"
+    if rt_features.hitObjects:
+        preamble += "#extension GL_EXT_shader_invocation_reorder : require\n"
     # done
     return preamble
 

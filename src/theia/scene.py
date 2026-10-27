@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from theia.device import getEnabledRayTracingFeatures
 from theia.material import MaterialFlags, MaterialStore
 import theia.units as u
 
@@ -431,22 +432,23 @@ class SphereBBox:
         self._glsl.radius = value
 
 
-def _createMeshFromTrimesh(mesh: trimesh.Trimesh) -> hp.Mesh:
+def _createMeshFromTrimesh(mesh: trimesh.Trimesh, unit: float = 1.0 * u.m) -> hp.Mesh:
     """util function converting a mesh from trimesh to hephaistos"""
     result = hp.Mesh()
-    vertices = np.concatenate((mesh.vertices, mesh.vertex_normals), axis=-1)
+    vertices = np.concatenate((mesh.vertices * unit, mesh.vertex_normals), axis=-1)
     result.vertices = np.ascontiguousarray(vertices, dtype=np.float32)
     result.indices = np.ascontiguousarray(mesh.faces, dtype=np.uint32)
     return result
 
 
-def loadMesh(filepath: str | Path) -> hp.Mesh:
+def loadMesh(filepath: str | Path, unit: float = 1.0 * u.m) -> hp.Mesh:
     """
     Loads the mesh stored at the given file path and returns a
     `hephaistos.Mesh` to be used in MeshStore.
+    The unit used in the mesh can be provided and defaults to meters.
     """
     mesh = trimesh.load_mesh(filepath)
-    return _createMeshFromTrimesh(mesh)
+    return _createMeshFromTrimesh(mesh, unit)
 
 
 class MeshInstance:
@@ -872,6 +874,17 @@ class Scene(SceneBase):
         self._objectIdMap = hp.Tensor(
             np.ascontiguousarray(objectIdMap, dtype=np.int32)
         )
+        # addresses of vertex and index buffer of each instance, needed by the
+        # hit shaders to fetch the triangle if position fetch is not supported
+        geometryMap = [a for inst in self._instances for a in (inst.vertices, inst.indices)]
+        self._geometryMap = hp.Tensor(
+            np.ascontiguousarray(geometryMap, dtype=np.uint64)
+        )
+
+    @property
+    def geometryMapTensor(self) -> hp.Tensor:
+        """Tensor containing the addresses of the vertices and indices of each instance"""
+        return self._geometryMap
 
     @property
     def instances(self) -> list[MeshInstance]:
@@ -890,7 +903,10 @@ class Scene(SceneBase):
 
     def bindParams(self, program: hp.Program | hp.RayTracingPipeline) -> None:
         super().bindParams(program)
-        program.bindParams(ObjectIdMap=self.objectIdMapTensor)
+        program.bindParams(
+            ObjectIdMap=self.objectIdMapTensor,
+            GeometryMap=self.geometryMapTensor,
+        )
 
 
 class MultiScene(SceneBase):
@@ -923,6 +939,12 @@ class MultiScene(SceneBase):
         Bounding box of the WORLD scene, limiting traced rays inside. Defaults
         to a cube of 1km in each primal direction.
 
+    Note
+    ----
+    Requires the position fetch ray tracing feature: unlike `Scene`, there is
+    no table of vertex and index buffers per sub-scene the hit shaders could
+    fall back to.
+
     See Also
     --------
     theia.trace.SceneForwardTracer: traces a MultiScene
@@ -935,6 +957,14 @@ class MultiScene(SceneBase):
         *,
         bbox: RectBBox | None = None,
     ) -> None:
+        # Without position fetch the hit shaders read the triangle through the
+        # GeometryMap, which is indexed by gl_InstanceID and therefore only
+        # covers a single TLAS.
+        if not getEnabledRayTracingFeatures().positionFetch:
+            raise RuntimeError(
+                "MultiScene requires the position fetch ray tracing feature, "
+                "which is not supported or not enabled on the current device."
+            )
         super().__init__(materials, bbox)
         # materialize eagerly: the order defines the instance ids the tables are
         # built against, and the argument may well be a one-shot generator
@@ -1213,9 +1243,9 @@ class SceneTemplate:
     ----------
     file: str | Path
         Path to the file containing the scene to be loaded
-    materials: MaterialStore | Mapping[str, int] | None, default=None
-        Material map used when creating scenes from this template. If None, it
-        must be explicitly passed to `createScene`.
+    materials: MaterialStore | None, default=None
+        Store containing the materials used by the scene. If None, it must be
+        explicitly passed to `createScene`.
     templateTransform: Transform | None, default=None
         Optional transformation to be applied to the loaded template
     detectorIdMap: Mapping[str, int] | None, default=None
@@ -1245,11 +1275,11 @@ class SceneTemplate:
         self,
         file: str | Path,
         *,
-        materials: MaterialStore | Mapping[str, int] | None = None,
-        sceneMedium: int = 0,
+        materials: MaterialStore | None = None,
         templateTransform: Transform | None = None,
         detectorIdMap: Mapping[str, int] | None = None,
         detectorMaterial: set[str] | None = None,
+        unit: float = 1.0 * u.m,
     ) -> None:
         # load file
         scene: trimesh.Scene = trimesh.load(file, force="scene")
@@ -1275,7 +1305,8 @@ class SceneTemplate:
         # collect material mapped (defined per mesh)
         matDict = {name: getMaterialName(name, m) for name, m in scene.geometry.items()}
         # load meshes to GPU
-        meshes = {name: _createMeshFromTrimesh(m) for name, m in scene.geometry.items()}
+        createMesh = lambda m: _createMeshFromTrimesh(m, unit)
+        meshes = {name: createMesh(m) for name, m in scene.geometry.items()}
         self._store = MeshStore(meshes)
 
         # assemble instances
@@ -1309,21 +1340,18 @@ class SceneTemplate:
 
         self._instances = MappingProxyType(instances)
         self.materials = materials
-        self._sceneMedium = sceneMedium
         self._idStride = nextId - 1
 
     @property
-    def materials(self) -> Mapping[str, int] | None:
+    def materials(self) -> MaterialStore | None:
         """
-        Material map used when creating scenes from this template. If None, it
-        must be explicitly passed to `createScene`.
+        Store containing the materials used by the scene. If None, it must be
+        explicitly passed to `createScene`.
         """
         return self._materials
 
     @materials.setter
-    def materials(self, value: MaterialStore | Mapping[str, int] | None) -> None:
-        if isinstance(value, MaterialStore):
-            value = value.material
+    def materials(self, value: MaterialStore | None) -> None:
         self._materials = value
 
     @property
@@ -1335,21 +1363,11 @@ class SceneTemplate:
     def instances(self) -> MappingProxyType[str, InstanceInfo]:
         return self._instances
 
-    @property
-    def sceneMedium(self) -> int:
-        """Device address of the medium the template is embedded within"""
-        return self._sceneMedium
-
-    @sceneMedium.setter
-    def sceneMedium(self, value: int) -> None:
-        self._sceneMedium = value
-
     def createScene(
         self,
         tempInstance: Iterable[Transform | None] | None = None,
         *,
-        materials: MaterialStore | Mapping[str, int] | None = None,
-        sceneMedium: int = 0,
+        materials: MaterialStore | None = None,
         sceneTransformation: Transform | None = None,
         sceneBBox: RectBBox | None = None,
         detectorIdStride: int | None = None,
@@ -1363,13 +1381,9 @@ class SceneTemplate:
         tempInstance: Iterable[Transform] | None, default=None
             List of `Transform` for each template instance. If None, a single
             instance without a transformation is used.
-        materials: MaterialStore | Mapping[str, int] | None, default=None
-            Material map used when creating scenes from this template. If None,
+        materials: MaterialStore | None, default=None
+            MaterialStore used when creating scenes from this template. If None,
             uses the one passed to the template.
-        sceneMedium: int, default=0
-            Device address of the medium the scene is emerged in, e.g. the
-            address of a water medium for an underwater simulation. Defaults to
-            zero specifying vacuum.
         sceneTransformation: Transform | None, default=None
             Optional transformation applied to the loaded scene
         sceneBBox : RectBBox | None, default=None
@@ -1392,8 +1406,6 @@ class SceneTemplate:
             materials = self.materials
         if materials is None:
             raise ValueError("No material mapping was provided!")
-        if isinstance(materials, MaterialStore):
-            materials = materials.material
         # single instance
         if tempInstance is None:
             tempInstance = [None]
@@ -1425,5 +1437,5 @@ class SceneTemplate:
                 sceneInst.append(inst)
 
         # create scene
-        scene = Scene(sceneInst, materials, medium=sceneMedium, bbox=sceneBBox)
+        scene = Scene(sceneInst, materials, bbox=sceneBBox)
         return scene, detIdMap

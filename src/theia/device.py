@@ -8,8 +8,12 @@ from functools import cache
 __all__ = [
     "initializeDevice",
     "isDeviceSuitable",
+    "isInvocationReorderSupported",
     "isRayTracingEnabled",
+    "getEnabledFloatControl",
+    "getEnabledFma",
     "getEnabledRayTracingFeatures",
+    "getEnabledRayTracingProperties",
     "selectDevice",
 ]
 
@@ -25,6 +29,12 @@ def getEnabledAtomics() -> set[hp.Atomics]:
 
 
 @cache
+def getEnabledFloatControl() -> hp.FloatControlSupport:
+    """Returns a cached version of currently supported float controls"""
+    return hp.getFloatControlSupport()
+
+
+@cache
 def getEnabledFma() -> hp.FmaSupport:
     """Returns a cached version of currently enabled OpFmaKHR"""
     return hp.getFmaSupport()
@@ -36,10 +46,21 @@ def getEnabledRayTracingFeatures() -> hp.RayTracingFeatures:
     return hp.getEnabledRayTracingFeatures()
 
 
+@cache
+def getEnabledRayTracingProperties() -> hp.RayTracingProperties:
+    """Returns a cached version of the current ray tracing properties"""
+    return hp.getRayTracingProperties()
+
+
 def isRayTracingEnabled() -> bool:
     """Returns True, if ray tracing is currently enabled"""
     # at minimum, we need ray tracing pipelines
     return getEnabledRayTracingFeatures().pipeline
+
+
+def isInvocationReorderSupported() -> bool:
+    """True, if the device supports shader execution reorder"""
+    return getEnabledRayTracingProperties().canReorder
 
 
 def isDeviceSuitable(id: int, *, requireRayTracing: bool = False) -> bool:
@@ -132,11 +153,14 @@ def initializeDevice(*, useSelectedDevice: bool = True, force: bool = False) -> 
 
     # reset any cached device specific properties
     getEnabledAtomics.cache_clear()
+    getEnabledFloatControl.cache_clear()
+    getEnabledFma.cache_clear()
     getEnabledRayTracingFeatures.cache_clear()
+    getEnabledRayTracingProperties.cache_clear()
     getPreamble.cache_clear()
 
     # select most suitable GPU if none is specified
-    if deviceId := hp.getSelectedDeviceId() is None or not useSelectedDevice:
+    if (deviceId := hp.getSelectedDeviceId()) is None or not useSelectedDevice:
         deviceId = selectDevice()
         if deviceId is None:
             warnings.warn("No suitable device found to run theia")
@@ -170,6 +194,21 @@ def initializeDevice(*, useSelectedDevice: bool = True, force: bool = False) -> 
         )
     hp.enableAtomics(requestedAtomics)
 
+    # float control and fma
+    supportedFloatControl = hp.getFloatControlSupport(deviceId)
+    if not supportedFloatControl.roundingModeRTEFloat32:
+        warnings.warn(
+            "Selected device does not guarantee support for rounding "
+            "to even (RTE) mode. Some calculations may produce larger "
+            "errors."
+        )
+    supportedFma = hp.getFmaSupport(deviceId)
+    if not supportedFma.float32:
+        warnings.warn(
+            "Selected device does not guarantee fused fma support. "
+            "Correct error calculations can thus not be guaranteed."
+        )
+
     # query ray tracing support
     rt_features = hp.getRayTracingFeatures(deviceId)
     rt_supported = rt_features.pipeline and rt_features.query
@@ -179,7 +218,7 @@ def initializeDevice(*, useSelectedDevice: bool = True, force: bool = False) -> 
         pipeline=rt_supported,
         indirectDispatch=rt_supported and rt_features.indirectDispatch,
         positionFetch=rt_supported and rt_features.positionFetch,
-        hitObjects=False,  # currently not widely supported
+        hitObjects=rt_supported and rt_features.hitObjects,
     )
     hp.enableRayTracing(rt_request, force=force)
     # force init of context to see if everything went well

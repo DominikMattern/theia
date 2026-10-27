@@ -32,6 +32,22 @@ ResultCode checkBoundary(const RAY ray, const PropagationParams params) {
     return RESULT_CODE_SUCCESS;
 }
 
+//gives the max distance a ray can keep propagating before leaving the bbox
+//assumes the ray is within the boundary box defined in PropagationParams
+float maxStepSize(const RAY ray, const PropagationParams params) {
+    vec3 exitPlane = mix(
+        params.lowerBBoxCorner,
+        params.upperBBoxCorner,
+        greaterThan(ray.direction, vec3(0.0)));
+    vec3 t = (exitPlane - ray.position) / ray.direction;
+    //ray cannot leave through a plane parallel to its direction
+    //for handling finite precision correctly, override (close to) parallel with FLT_MAX
+    const float FLT_MIN = 1.1754943508222875e-38;
+    const float FLT_MAX = 1.7014118346046923e+38;
+    t = mix(t, vec3(FLT_MAX), lessThan(abs(ray.direction), vec3(FLT_MIN)));
+    return min(min(t.x, t.y), t.z);
+}
+
 //If the ray constitutes a particle, it does not posses a contrib parameter.
 //In that case we must not produce code using that parameter.
 
@@ -83,13 +99,9 @@ ResultCode updateRayIS(
             // -> we need to divide by the scatter coef if we did not hit anything
             ray.lin_contrib /= params.sampleCoefficient;
         }
-
-        //apply volume effects
-        applyVolume(ray, dist, hit, idx, dim);
     }
-    //If sampleCoefficient is zero, we didn't do any importance sampling
-    // -> do nothing
-    return RESULT_CODE_SUCCESS;
+    //apply volume effects
+    return applyVolume(ray, dist, hit, idx, dim);
 }
 
 ResultCode propagate(
@@ -181,8 +193,10 @@ ResultCode propagateSampled(
     ResultCode code = propagateRay(ray, dist);
     if (code < 0) return code;
     //apply volume effects
-    code = updateRayIS(ray, dist, hit, params, idx, dim);
-    if (code < 0) return code;
+    if (ray.mediumIdx != VACUUM_MEDIUM_IDX) {
+        code = updateRayIS(ray, dist, hit, params, idx, dim);
+        if (code < 0) return code;
+    }
 
     //boundary check
     return checkBoundary(ray, params);

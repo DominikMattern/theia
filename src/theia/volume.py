@@ -8,7 +8,7 @@ import json
 from theia.compiler import createPreamble, loadShader
 
 from importlib.resources.abc import Traversable
-from typing import ClassVar, Type
+from typing import ClassVar, Type, Literal
 
 
 __all__ = [
@@ -26,13 +26,14 @@ def __dir__():
 
 @dataclass
 class VolumeRNGDraws:
-    """Amount of random numbers needed for each volume model function"""
+    """Number of RNG calls in each volume model function"""
 
     sampleInteractionLength: int = 0
     applyVolumeEffect: int = 0
     sampleVolumeInteraction: int = 0
     sampleVolumeScattering: int = 0
     volumeScatterRay: int = 0
+    sampleVolumeNeeStepSize: int = 0
 
 
 class VolumeModel(ABC):
@@ -61,12 +62,14 @@ class VolumeModel(ABC):
         rngDraws: VolumeRNGDraws,
         # sbtRecord: bytes | None = None,
         supportsNEE: bool = False,
+        supportsMIS: bool = False,
         supportsParticle: bool = False,
         requiredMediumProperties: set[str] = set(),
     ) -> None:
         self.rngDraws = rngDraws
         # self.sbtRecord = sbtRecord
         self.supportsNEE = supportsNEE
+        self.supportsMIS = supportsMIS
         self.supportsParticle = supportsParticle
         self.requiredMediumProperties = frozenset(requiredMediumProperties)
 
@@ -130,12 +133,14 @@ class Attenuating(VolumeModel, name="attenuating"):
             sampleInteractionLength=1,
             applyVolumeEffect=0,
             sampleVolumeInteraction=2,
-            sampleVolumeScattering=2,
+            sampleVolumeScattering=1,
             volumeScatterRay=0,
+            sampleVolumeNeeStepSize=1,
         )
         super().__init__(
             rngDraws=rngDraws,
             supportsNEE=True,
+            supportsMIS=True,
             supportsParticle=True,
             requiredMediumProperties={
                 "absorption_coef",
@@ -205,7 +210,7 @@ class Fluorescent(VolumeModel, name="fluorescent"):
     Setting `allowWavelengthUpShift` to `False` enforces that re-emission only
     create longer wavelengths.
 
-    Using `timeModel` the time delay caused by the fluorescence can be controlled: 
+    Using `timeModel` the time delay caused by the fluorescence can be controlled:
     If set to `delta`, the time delay is always equal to `fluorescence_time`. If
     set to `exponential`, the time delay is sampled from an exponential decay
     with time constant `fluorescence_time`.
@@ -220,17 +225,16 @@ class Fluorescent(VolumeModel, name="fluorescent"):
         *,
         absorb: bool = False,
         allowWavelengthUpShift: bool = False,
-        timeModel: str = "delta"
+        timeModel: Literal["delta", "exponential"] = "delta",
     ) -> None:
-        timeModels = ["delta", "exponential"]
-        if timeModel not in timeModels:
-            raise AttributeError(f"{timeModel} is not a supported time model.")
+        if timeModel not in ("delta", "exponential"):
+            raise ValueError(f"{timeModel} is not a supported time model.")
         rngDraws = VolumeRNGDraws(
             sampleInteractionLength=1,
             applyVolumeEffect=0,
             sampleVolumeInteraction=4 if timeModel == "delta" else 5,
-            sampleVolumeScattering=3 if timeModel == "delta" else 4,
-            volumeScatterRay=1,
+            sampleVolumeScattering=2,
+            volumeScatterRay=2 if timeModel == "delta" else 3,
         )
         super().__init__(
             rngDraws=rngDraws,
@@ -239,7 +243,7 @@ class Fluorescent(VolumeModel, name="fluorescent"):
             requiredMediumProperties={
                 # LUTs
                 "absorption_coef",
-                "fluorescent_coef",
+                "fluorescence_coef",
                 "scattering_coef",
                 "log_phase_function",
                 "phase_sampling",
@@ -263,9 +267,9 @@ class Fluorescent(VolumeModel, name="fluorescent"):
     def allowWavelengthUpShift(self) -> bool:
         """Whether volume fluorescence may re-emit at shorter wavelengths"""
         return self._allowUpshift
-    
+
     @property
-    def timeModel(self) -> str:
+    def timeModel(self) -> Literal["delta", "exponential"]:
         """Model of the time delay caused by the fluorescence."""
         return self._timeModel
 
@@ -293,7 +297,7 @@ class Fluorescent(VolumeModel, name="fluorescent"):
         config = {
             "absorb": self.isAbsorbing,
             "allowWavelengthUpShift": self.allowWavelengthUpShift,
-            "timeModel": self.timeModel
+            "timeModel": self.timeModel,
         }
         with file.open("w") as f:
             json.dump(config, f)
@@ -307,8 +311,12 @@ class Fluorescent(VolumeModel, name="fluorescent"):
         )
 
     def __hash__(self) -> int:
-        return (hash(self.name) ^ hash(self.isAbsorbing) 
-                ^ hash(self.allowWavelengthUpShift) ^ hash(self.timeModel))
+        return (
+            hash(self.name)
+            ^ hash(self.isAbsorbing)
+            ^ hash(self.allowWavelengthUpShift)
+            ^ hash(self.timeModel)
+        )
 
 
 class Transparent(VolumeModel, name="transparent"):
