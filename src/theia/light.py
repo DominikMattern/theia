@@ -1324,20 +1324,14 @@ class VoxelLightSource(LightSource):
     default grid shape of `(1, 1, 1)`, the whole box is sampled uniformly.
 
     If `checkMedium` is set, the source restricts the sampled positions to the
-    medium it emits into by querying the scene at each candidate position. If
-    none of the `maxAttempts` candidates lies inside the medium, the sample is
-    rejected and the tracer does not create a ray. The number of created rays
-    per cell can be retrieved via `rayCount`. Positions from which the query
-    hits no surface at all are rejected as well, unless `acceptLostRays` is set:
-    theia scenes have no medium of their own, so a medium extending to the
-    scene's bounding box without being enclosed by a surface (e.g. the world
-    volume of a GDML) can only be identified this way. The direction of the
-    query is reused as emission direction. This requires the medium to only
-    depend on the position, i.e. the geometry must either be closed, or be
-    surrounded by a single medium and `acceptLostRays` be set. Otherwise the
-    rejection depends on the direction, e.g. through an opening of the geometry,
-    and biases the emission. Checking the medium is only
-    supported by scene forward tracers.
+    medium it emits into by tracing a ray through the scene until the first
+    surface hit and checking the medium given by the surface. If none of the
+    `maxAttempts` candidates lies inside the medium, the sample is rejected and
+    the tracer does not create a ray. The number of created rays per cell can be
+    retrieved via `rayCount`. Positions from which the query hits no surface at
+    all are rejected as well, unless `acceptLostRays` is set.
+
+    Checking the medium is only supported by scene forward tracers.
 
     Note
     ----
@@ -1429,11 +1423,14 @@ class VoxelLightSource(LightSource):
             raise ValueError("raysPerCell must be at least one")
         if checkMedium and maxCellsPerBatch is None:
             raise ValueError("maxCellsPerBatch is required if checkMedium is set")
-        # position (3) and direction (2) per attempt + time
-        nRNG = 5 * maxAttempts + 1 if checkMedium else 6
+        # position and direction per attempt + time
+        nRNG = 2 * maxAttempts + 1 if checkMedium else 3
+        draws = LightSourceRNGDraws(
+            sampleLightForward=wavelengthSource.nRNGSamples + nRNG,
+        )
         super().__init__(
-            nRNGForward=wavelengthSource.nRNGSamples + nRNG,
-            wavelengthSource=wavelengthSource,
+            wavelengthSource,
+            rngDraws=draws,
             params={"LightParams": VoxelLightSource.LightParams},
             extra={"upper", "budget", "autoAdvance"},
         )

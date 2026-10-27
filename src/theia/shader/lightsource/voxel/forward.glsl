@@ -70,7 +70,7 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
     #ifdef LIGHT_SOURCE_CHECK_MEDIUM
     bool valid = false;
     for (uint i = 0; i < LIGHT_SOURCE_MAX_ATTEMPTS && !valid; ++i) {
-        vec3 u = vec3(random2D(idx, dim), random(idx, dim));
+        vec3 u = random3D(idx, dim);
         position = u * lightParams.cellSize + cellLower;
         //reused as emission direction, see above
         direction = sampleUnitSphere(random2D(idx, dim));
@@ -92,7 +92,7 @@ ForwardRay sampleLight(uint idx, inout uint dim) {
         direction = vec3(0.0);
     }
     #else
-    vec3 u = vec3(random2D(idx, dim), random(idx, dim));
+    vec3 u = random3D(idx, dim);
     position = u * lightParams.cellSize + cellLower;
     direction = sampleUnitSphere(random2D(idx, dim));
     #endif

@@ -12,7 +12,13 @@ from scipy.integrate import cumulative_trapezoid
 from scipy.special import ndtri, pdtrik
 from theia.compiler import createPreamble, loadShader
 
-from theia.light import LightSource, WavelengthSource, frankTamm, _make_scalar_array
+from theia.light import (
+    LightSource,
+    LightSourceRNGDraws,
+    WavelengthSource,
+    frankTamm,
+    _make_scalar_array,
+)
 from theia.lookup import Table
 from theia.material import Medium, MaterialStore
 from theia.property import TableProperty
@@ -1415,11 +1421,16 @@ class ScintillationDepositionEventSource(LightSource):
         extra = {"expectedPhotonNumber"}
         if numSamples is not None:
             extra.add("numSamples")
+        # position along the segment, direction and time delay (forward) or
+        # position and time delay (backward)
+        draws = LightSourceRNGDraws(
+            sampleLightForward=(0 if wavelengthSource is None
+                                else wavelengthSource.nRNGSamples + 3 + addRNG),
+            sampleLightBackward=2 + addRNG,
+        )
         super().__init__(
-            nRNGForward=(0 if wavelengthSource is None
-                         else wavelengthSource.nRNGSamples + 4 + addRNG),
-            nRNGBackward=2 + addRNG,
-            wavelengthSource=wavelengthSource,
+            wavelengthSource,
+            rngDraws=draws,
             params={"LightParams": LightParams},
             extra=extra,
         )
