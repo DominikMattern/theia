@@ -7,8 +7,7 @@
 #define NO_TRANSMIT_BIT MATERIAL_NO_TRANSMIT_BWD_BIT
 
 //the gaussian micro-facet functions are prepended to this file during
-//compilation, and SURFACE_UNIFIED_TRANSMISSION selects the dielectric
-//variant over the metal one (see surface.py)
+//compilation (see surface.py)
 #define RAY BackwardRay
 #include "surface/unified/template.glsl"
 #undef RAY

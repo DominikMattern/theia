@@ -1830,6 +1830,12 @@ _ROUGH_METAL_PARAMS = [
     (False, False, "TR", 80),
     (False, False, "R", 40),
     (False, False, "DR", 40),
+    # reflection forbidden -> reflected rays are absorbed, detection unchanged
+    (True, False, "T", 40),
+    (True, False, "D", 40),
+    (False, True, "T", 40),
+    (False, False, "T", 40),
+    (False, False, "D", 40),
 ]
 
 
@@ -1882,13 +1888,17 @@ def _test_rough_metal_surface(surface, microfacet_sampler, particle, camera, fla
     absorbed = result["hitResult"] == EventResultCode.RAY_ABSORBED
     assert np.all(result["hitResult"][~absorbed] == EventResultCode.RAY_HIT)
 
+    noReflect = "R" not in flags
+    if noReflect:
+        assert np.all(absorbed)
+
     normals = np.tile(normal, (N, 1)).astype(np.float32)
     cosNrm = np.multiply(result["directionOut"], normal[None, :]).sum(1).astype(np.float32)
     trans = (cosNrm < 0.0) & ~absorbed
     refl = (cosNrm > 0.0) & ~absorbed
     # metals never transmit
     assert trans.sum() == 0
-    if not particle:
+    if not particle and not noReflect:
         assert absorbed.sum() == 0  # metals reflect every wave (attenuated by R)
 
     # check we prevent self intersection
@@ -1956,6 +1966,15 @@ def _test_rough_metal_surface(surface, microfacet_sampler, particle, camera, fla
     if not particle and not camera and enough_r:
         cH = result["contribHit"]
         assert np.mean(cH[~absorbed]) == pytest.approx((1 - R_mean_r) * np.mean(c[~absorbed]), rel=rel_err)
+
+    if noReflect and not camera and mask_r.sum() >= 20000:
+        # nothing is traced further, but the detector still sees only 1 - R
+        if particle:
+            hit = result["hitSuccess"] == 1
+            assert np.mean(hit) == pytest.approx(1 - R_mean_r, abs=abs_err)
+        else:
+            cH = result["contribHit"]
+            assert np.mean(cH) == pytest.approx((1 - R_mean_r) * np.mean(c), rel=rel_err)
 
 
 @pytest.mark.parametrize("particle,camera,flags,angle", _ROUGH_METAL_PARAMS)

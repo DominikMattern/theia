@@ -64,30 +64,6 @@ vec3 sampleMicrofacetNormal(
         + sin(theta) * sin(phi) * params.tangent2;
 }
 
-#ifdef ROUGH_SURFACE_NEE
-//Deterministic twin of sampleMicrofacetNormal(): the density with which it
-//draws `microfacetNormal`, measured in solid angle (normalized to one over the
-//upper hemisphere). Sampling theta with p(theta) ~ sin(theta)*exp(-theta^2/2sigma^2)
-//and phi uniformly cancels the sin(theta) of the solid angle measure:
-//
-//    p(w_h) = p(theta) / (2*pi*sin(theta)) = exp(-theta^2/2sigma^2) / (2*pi*Z_sigma)
-//
-//Z_sigma = int_0^(pi/2) sin(t)*exp(-t^2/2sigma^2) dt has no closed form and is
-//computed on the host from `roughness_parameter` (see theia.microfacet).
-float evalMicrofacetDensity(
-    const MicrofacetParams params,
-    vec3 microfacetNormal,
-    const SurfaceHit hit,
-    vec3 rayDir
-) {
-    float cos_h = dot(microfacetNormal, hit.rayNrm);
-    if (cos_h <= 0.0) return 0.0;
-    float theta = acos(min(cos_h, 1.0));
-    float norm = loadMaterialConstant(MICROFACET_Z_SIGMA, hit.materialIdx);
-    return exp(-theta * theta / (2.0 * params.sigma * params.sigma)) / (TWO_PI * norm);
-}
-#endif
-
 float microfacetAcceptProb(
     const MicrofacetParams params,
     vec3 dirOut,

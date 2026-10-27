@@ -4,11 +4,12 @@
 #include "math.glsl"
 
 /*
-Reflection-lobe logic of the Geant4 UNIFIED model, shared by its dielectric and
-its metal variant (see template.glsl). The reflected component is decomposed into
-specular spike, specular lobe, diffuse lobe and backscattering. The split is
-controlled by the optional material properties `prob_backscatter`,
-`prob_specularspike`, `prob_specularlobe` and `prob_diffuselobe`.
+Reflection-lobe logic of the Geant4 UNIFIED model, shared by its dielectric
+(surface/unified/) and its metal variant (surface/metal_unified/). The reflected
+component is decomposed into specular spike, specular lobe, diffuse lobe and
+backscattering. The split is controlled by the optional material properties
+`prob_backscatter`, `prob_specularspike`, `prob_specularlobe` and
+`prob_diffuselobe`.
 */
 
 struct ReflectionLobes {

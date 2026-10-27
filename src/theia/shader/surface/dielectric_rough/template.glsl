@@ -4,21 +4,16 @@
 
 /*
 Shared implementation of all rough dielectric surface models. The only
-model-specific parts are `prepareMicrofacet`, `sampleMicrofacetNormal`,
-`microfacetAcceptProb` and, for NEE/MIS, `evalMicrofacetDensity`, which are
-provided by one of the files in `microfacet_models/` (see api.glsl there).
+model-specific parts are `prepareMicrofacet`, `sampleMicrofacetNormal` and
+`microfacetAcceptProb`, which are provided by one of the files in
+`microfacet_models/` (see api.glsl there).
 
 The Geant4 UNIFIED model, which splits the reflection into several lobes and
 walks across the micro structure instead of rejecting facets, lives in
 surface/unified/ instead.
 */
 
-//SURFACE_MODEL_SPECULAR and ROUGH_SURFACE_NEE are resolved in
-//surface/rough_nee_config.glsl, which theia.surface prepends ahead of the
-//micro-facet model so the model can key off them as well.
-#ifdef ROUGH_SURFACE_NEE
-#define ROUGH_NEE_TRANSMISSION
-#endif
+#define SURFACE_MODEL_SPECULAR
 
 struct SurfaceProperties {
     float reflectance;      ///< Fresnel reflectance at the accepted micro-facet
@@ -26,66 +21,10 @@ struct SurfaceProperties {
     vec3 dirReflected;
     vec3 dirTransmitted;
     bool doReflect;
-    //Refractive indices of the two sides, cached because the NEE functions need
-    //them a dozen times per surface hit and each lookup is a chain of dependent
-    //memory accesses. They do not depend on the sampled facet.
-    float n_i;
-    float n_o;
 };
 
 //tell tracer we want to do some prep work
 #define SurfaceProperties SurfaceProperties
-
-//this model transmits; the normalization shader keys off this
-#define ROUGH_SURFACE_HAS_TRANSMISSION
-
-float roughFresnel(float cos_i, const SurfaceProperties props) {
-    return fresnelReflectance(cos_i, props.n_i, props.n_o);
-}
-
-//Probability that the facet loop accepts this facet at all, i.e. through either
-//channel. Consumed by surface/microfacet/normalization.glsl, which tabulates
-//exactly this quantity. It has to match the facet loop in prepareSurface().
-float roughFacetAcceptance(
-    const MicrofacetParams mfParams, vec3 rayDir, const SurfaceHit hit,
-    float eta, vec3 microfacetNormal
-) {
-    float F = fresnelReflectance(abs(dot(rayDir, microfacetNormal)), eta, 1.0);
-    vec3 dirR = reflect(rayDir, microfacetNormal);
-    vec3 dirT = refract(rayDir, microfacetNormal, eta);
-    float aR = dot(dirR, hit.rayNrm) > 0.0
-        ? microfacetAcceptProb(mfParams, dirR, microfacetNormal, hit, rayDir)
-        : 0.0;
-    //a zero direction marks total internal reflection
-    float aT = dot(dirT, hit.rayNrm) < 0.0
-        ? microfacetAcceptProb(mfParams, dirT, microfacetNormal, hit, rayDir)
-        : 0.0;
-    return F * aR + (1.0 - F) * aT;
-}
-
-#ifdef ROUGH_SURFACE_NEE
-/*
-Acceptance rate of the facet loop below, computed on the device by
-surface/microfacet/normalization.glsl.
-
-The second axis is the inward ratio `n_outside/n_inside`, taken at equal
-wavelengths. Both traversal directions share it - a ray going inward sees that
-ratio as its eta, one going outward its reciprocal - so one table per direction
-over the same, narrow axis covers everything. Indexing by eta directly would
-instead need the hull of both directions, which always encloses the useless
-eta = 1.
-*/
-float roughNormalization(
-    const RAY ray, const SurfaceHit hit, const SurfaceProperties props
-) {
-    float mu_i = abs(dot(ray.direction, hit.rayNrm));
-    //the axis always holds the inward ratio, whichever way the ray travels
-    float etaInward = hit.inward ? props.n_i / props.n_o : props.n_o / props.n_i;
-    return hit.inward
-        ? lookUpMaterialTable2D(MICROFACET_Z_INWARD, hit.materialIdx, mu_i, etaInward, 0.0)
-        : lookUpMaterialTable2D(MICROFACET_Z_OUTWARD, hit.materialIdx, mu_i, etaInward, 0.0);
-}
-#endif
 
 SurfaceProperties prepareSurface(
     const RAY ray,
@@ -110,8 +49,6 @@ SurfaceProperties prepareSurface(
     props.dirReflected = vec3(0.0);
     props.dirTransmitted = vec3(0.0);
     props.doReflect = false;
-    props.n_i = n_i;
-    props.n_o = n_o;
 
     /*
     For reflect-and-transmit ("RT") we use the following rejection sampling:
@@ -132,7 +69,7 @@ SurfaceProperties prepareSurface(
         weight *= 1 - q_forbidden          accept with q_allowed/(1 - q_forbidden)
 
     which leaves both the emitted mass q_allowed and the continuation mass
-    1 - q_R - q_T of the loop untouched, and hence the normalization as well.
+    1 - q_R - q_T of the loop untouched.
 
     Particles cannot carry a weight, so they always take the plain
     reflect-and-transmit decision; sampleSurfaceInteraction() then absorbs the
@@ -342,7 +279,3 @@ ResultCode sampleSurfaceInteraction(
     //success
     return result >= 0 ? RESULT_CODE_RAY_HIT : result;
 }
-
-#ifdef ROUGH_SURFACE_NEE
-#include "surface/rough_nee.glsl"
-#endif

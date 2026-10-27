@@ -74,40 +74,6 @@ float maskingFunction(float cos_n, float alpha){
     return 1.0 / (1.0 + Lambda);
 }
 
-
-#ifdef ROUGH_SURFACE_NEE
-//Deterministic twin of sampleMicrofacetNormal(): the density with which it
-//draws `microfacetNormal`, measured in solid angle. This is the distribution of
-//visible normals
-//
-//    D_vis(h) = G1(w_i) * max(0, dot(w_i,h)) * D(h) / dot(w_i,n)
-//
-//with D the Trowbridge-Reitz NDF. Already normalized to one, and zero for
-//back-facing facets, so the front-face condition needs no separate factor.
-float evalMicrofacetDensity(
-    const MicrofacetParams params,
-    vec3 microfacetNormal,
-    const SurfaceHit hit,
-    vec3 rayDir
-) {
-    float cos_h = dot(microfacetNormal, hit.rayNrm);
-    if (cos_h <= 0.0) return 0.0;
-    //w_i points away from the surface, i.e. against the ray direction
-    float cos_i = -dot(rayDir, microfacetNormal);
-    float cos_n = abs(dot(rayDir, hit.rayNrm));
-    if (cos_i <= 0.0 || cos_n <= 0.0) return 0.0;
-
-    float cos2 = cos_h * cos_h;
-    float tan2 = (1.0 - cos2) / cos2;
-    float a2 = params.alpha * params.alpha;
-    float d = a2 + tan2;
-    float D = a2 / (PI * cos2 * cos2 * d * d);
-
-    return maskingFunction(cos_n, params.alpha) * cos_i * D / cos_n;
-}
-
-#endif
-
 float microfacetAcceptProb(
     const MicrofacetParams params,
     vec3 dirOut,

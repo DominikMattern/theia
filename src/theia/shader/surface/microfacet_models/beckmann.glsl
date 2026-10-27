@@ -39,26 +39,6 @@ vec3 sampleMicrofacetNormal(
         + sin_theta * sin(phi) * params.tangent2;
 }
 
-#ifdef ROUGH_SURFACE_NEE
-//Deterministic twin of sampleMicrofacetNormal(): the density with which it
-//draws `microfacetNormal`, measured in solid angle (normalized to one over the
-//upper hemisphere). Equals D(h)*cos(theta_h) for the Beckmann NDF.
-float evalMicrofacetDensity(
-    const MicrofacetParams params,
-    vec3 microfacetNormal,
-    const SurfaceHit hit,
-    vec3 rayDir
-) {
-    float cos_h = dot(microfacetNormal, hit.rayNrm);
-    if (cos_h <= 0.0) return 0.0;
-    float cos2 = cos_h * cos_h;
-    float tan2 = (1.0 - cos2) / cos2;
-    float a2 = params.alpha * params.alpha;
-    return exp(-tan2 / a2) / (PI * a2 * cos2 * cos_h);
-}
-
-#endif
-
 float microfacetAcceptProb(
     const MicrofacetParams params,
     vec3 dirOut,

@@ -832,7 +832,6 @@ def _createTableEntryFromMaterial(
     material: Material,
     mediaDict: dict[str, Medium],
     mediaTable: PropertyTable,
-    media: Mapping[str, Medium] = {},
 ) -> PropertyTableEntry:
     """Util function converting material to a property table entry"""
     # fetch media names
@@ -878,17 +877,6 @@ def _createTableEntryFromMaterial(
             )
     # add additional material properties
     props.update(material.properties)
-
-    # properties the surface model derives from the material's own ones. They are
-    # deliberately not stored on the Material: they are reconstructed on the next
-    # upload and must not end up in saveMaterials().
-    derived = material.physicModel.derivedMaterialProperties(material, media)
-    if collisions := derived.keys() & material.properties.keys():
-        raise ValueError(
-            f'Material "{material.name}" defines {sorted(collisions)}, which '
-            f'"{material.physicModel.name}" computes itself'
-        )
-    props.update(derived)
 
     # check all properties required by the physic model are present
     reqMatProps = material.physicModel.requiredMaterialProperties
@@ -994,18 +982,6 @@ class MaterialStore:
         _map = _createTableEntryFromMaterial
         materialDict = {m.name: _map(m, mediaDict, self._mediaTable) for m in material}
         self._materialTable = PropertyTable(materialDict, requiredSlots=materialSlots)
-
-        # Now that all tables exist, let the surface models fill in whatever
-        # needed them as input. Grouping by model only saves preparing the same
-        # model twice (e.g. compiling a shader): the models still see every
-        # material individually, and anything material specific - a roughness, a
-        # table's axis range - has to be read from the tables rather than baked
-        # into that preparation.
-        byModel: dict[int, list[int]] = {}
-        for matIdx, modelIdx in enumerate(self._surfaceModelIndices):
-            byModel.setdefault(modelIdx, []).append(matIdx)
-        for modelIdx, indices in byModel.items():
-            self._surfaceModels[modelIdx].finalizeMaterials(self, indices)
 
     @property
     def header(self) -> dict[str, str]:
