@@ -1439,7 +1439,7 @@ _ROUGH_DIELECTRIC_PARAMS = [
 
 def _test_rough_dielectric_surface(surface, microfacet_sampler, particle, 
                                    camera, flags, angle, alpha=0.15, masking_function=None):
-    np.random.seed(0xABCD + 10*(1+particle+2*camera)*int(angle))
+    np.random.seed(0xABCD)
     N = 64 * 1024
     lam = 600.0 * u.nm
     direction = (
@@ -1545,8 +1545,8 @@ def _test_rough_dielectric_surface(surface, microfacet_sampler, particle,
 
     # use relative error for reflectivities / angles and absolute errors for components of
     # directions (they can be very close to 0 for some incident angles)
-    # Note: These tolerances are not super high considering the amount of tests we run. There
-    # is a non-zero chance that some tests will fail if the RNG seed gets changed.
+    # Note: These tolerances are not super high. There is a non-zero chance that some tests
+    # will fail if the RNG seed gets changed.
     rel_err = 0.015
     abs_err = 0.004
 
