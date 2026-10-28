@@ -307,16 +307,21 @@ def test_SceneForwardTracer_particle(
 
 
 @pytest.mark.parametrize(
-    "mu_a,mu_s,g",
+    "mu_a,mu_s,g,wavefrontCompactionSchedule",
     [
-        (0.0, 0.01, 0.0),
-        (0.05, 0.005, 0.5),
-        (0.05, 0.005, -0.5),
+        (0.0, 0.01, 0.0, None),
+        (0.05, 0.005, 0.5, None),
+        (0.05, 0.005, -0.5, None),
+        (0.0, 0.01, 0.0, [1, 2, 3]),
     ],
 )
 @pytest.mark.parametrize("sampleCoef", [float("NaN"), 0.01])
 def test_SceneForwardTracer_CrossCheck(
-    mu_a: float, mu_s: float, g: float, sampleCoef: float
+    mu_a: float,
+    mu_s: float,
+    g: float,
+    wavefrontCompactionSchedule: list[int] | None,
+    sampleCoef: float,
 ) -> None:
     """
     Here we test SceneForwardTracer's target sampling.
@@ -424,6 +429,7 @@ def test_SceneForwardTracer_CrossCheck(
         maxPathLength=max_length,
         targetGuide=guide,
         sampleCoefficient=sampleCoef,
+        wavefrontCompactionSchedule=wavefrontCompactionSchedule,
         # maxTime=maxTime
     )
     # create pipeline + scheduler
@@ -774,8 +780,17 @@ def test_SceneBackwardTracer(
     assert np.abs(estimate / contrib - 1.0) < 5e-3
 
 
-@pytest.mark.parametrize("sampleCoef", [float("NaN"), 0.3])
-def test_SceneBackwardTargetTracer(sampleCoef: float) -> None:
+@pytest.mark.parametrize(
+    "sampleCoef,wavefrontCompactionSchedule",
+    [
+        (float("NaN"), None),
+        (0.3, None),
+        (float("NaN"), [5, 10, 15]),
+    ],
+)
+def test_SceneBackwardTargetTracer(
+    sampleCoef: float, wavefrontCompactionSchedule: list[int] | None
+) -> None:
     if not isRayTracingEnabled():
         pytest.skip("ray tracing not supported")
 
@@ -837,6 +852,7 @@ def test_SceneBackwardTargetTracer(sampleCoef: float) -> None:
         targetId=1,
         sampleCoefficient=sampleCoef,
         maxTime=maxTime,
+        wavefrontCompactionSchedule=wavefrontCompactionSchedule,
     )
     rng.autoAdvance = tracer.nRNGSamples
     # create pipeline + scheduler
@@ -1074,6 +1090,8 @@ def test_SceneForwardTracer_MultiScene() -> None:
     """
     if not isRayTracingEnabled():
         pytest.skip("ray tracing not supported")
+    if not getEnabledRayTracingFeatures().positionFetch:
+        pytest.skip("position fetch is not supported")
 
     # scene settings
     lam = 500.0 * u.nm

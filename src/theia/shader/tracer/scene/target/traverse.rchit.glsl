@@ -1,4 +1,4 @@
-#ifdef RAY_PORTAL
+#ifdef TRACE_MULTISCENE
 //enable the gl_InstanceID-dependent portal helpers. Has to come first, since the
 //surface model already includes tracer/scene/portal.glsl.
 #define PORTAL_HIT_STAGE
@@ -24,17 +24,17 @@
 #include "tracer/scene/target/nee.glsl"
 #endif
 
-#ifndef RAY_PORTAL
-//mapping from TLAS instance -> objectId. Under RAY_PORTAL the per-scene and
-//per-context ObjectIdTable takes over (see tracer/scene/portal.glsl) and MultiScene binds no
-//flat map at all, so the declaration must not survive here.
+#ifndef TRACE_MULTISCENE
+//mapping from TLAS instance -> objectId. Under TRACE_MULTISCENE the per-scene
+//and per-context ObjectIdTable takes over (see tracer/scene/portal.glsl) and
+//MultiScene binds no flat map at all, so the declaration must not survive here.
 readonly buffer ObjectIdMap{ int objectIdMap[]; };
 #endif
 
 layout(location = 0) rayPayloadInEXT TraceData traceData;
 hitAttributeEXT vec2 barys; //filled by default intersection shader
 
-#ifdef RAY_PORTAL
+#ifdef TRACE_MULTISCENE
 #include "tracer/scene/portal.glsl"
 #endif
 
@@ -68,7 +68,7 @@ void traceNEE(
     ray.lin_contrib *= abs(dot(newDir, hit.rayNrm));
 
     //trace NEE
-    traceNEE(ray, dist, weight, params.tlas, dim);
+    traceNEE(ray, dist, weight, params.tlas, traceData.idx, dim);
 }
 
 //MIS is a sampling method that combines multiple distributions using weights
@@ -189,7 +189,7 @@ void main() {
     //did we hit a target?
     bool isTarget = (hit.flags & MATERIAL_TARGET_BIT) != 0;
     //do we have a filter on the objectId? (0x80000000 marks no filter)
-    #ifdef RAY_PORTAL
+    #ifdef TRACE_MULTISCENE
     int objectId = portalObjectId(traceData.ray.frame);   //right table per frame
     #else
     int objectId = objectIdMap[gl_InstanceID];
@@ -245,6 +245,6 @@ void main() {
     //if we have a specular surface, we can still do NEE by extending the
     //already processed ray to the target guide
     #if defined(SURFACE_MODEL_SPECULAR) && !defined(DISABLE_NEE)
-    traceNEE(traceData.ray, params.tlas, dim);
+    traceNEE(traceData.ray, params.tlas, traceData.idx, dim);
     #endif
 }

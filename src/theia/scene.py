@@ -1002,7 +1002,7 @@ class MultiScene(SceneBase):
 
     @property
     def macros(self) -> dict[str, bool]:
-        return {"RAY_PORTAL": True}
+        return {"TRACE_MULTISCENE": True}
 
     @property
     def scenes(self) -> list[list[MeshInstance]]:

@@ -89,17 +89,17 @@ class RayModel(ABC):
         """Source code of the ray model."""
         pass
 
-    def waveItem(self, *, portal: bool) -> type[Structure]:
+    def waveItem(self, *, multiScene: bool) -> type[Structure]:
         """
         Structure describing the fields and memory layout of the trace state a
-        wavefront tracer stores between waves. Unlike `forwardItem` this has to
-        hold everything needed to RESUME a path, not just to record it.
+        tracer with wavefront compaction stores between waves. Unlike `forwardItem`
+        this has to hold everything needed to RESUME a path, not just to record it.
 
-        Set `portal` if the ray carries a frame, i.e. if the tracer traces
-        sub-scenes (`MultiScene`).
+        Set `multiScene` if the ray carries a frame, i.e. if the tracer traces
+        a `MultiScene`.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not support wavefront tracing"
+            f"{type(self).__name__} does not support wavefront compaction"
         )
 
 
@@ -180,9 +180,9 @@ class UnpolarizedRay(RayModel):
     def hitItem(self) -> type[Structure]:
         return self._hitItem
 
-    def waveItem(self, *, portal: bool) -> type[Structure]:
-        # MUST stay in sync with saveWaveRay()/loadWaveRay() in
-        # shader/ray/unpolarized.glsl
+    def waveItem(self, *, multiScene: bool) -> type[Structure]:
+        # must stay in sync with saveWaveRay()/loadWaveRay() in
+        # shader/ray/unpolarized.glsl.
         fields = [
             ("position", c_float * 3),
             ("direction", c_float * 3),
@@ -196,7 +196,7 @@ class UnpolarizedRay(RayModel):
             # like `forwardItem` does can underflow over hundreds of iterations
             fields.append(("lin_contrib", c_float))
             fields.append(("log_contrib", c_float))
-        if portal:
+        if multiScene:
             fields.append(("frame", c_uint32 * 2))
         fields.append(("idx", c_uint32))  # path id: RNG stream + attribution
         fields.append(("dim", c_uint32))  # position in the RNG sequence

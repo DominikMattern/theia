@@ -20,7 +20,7 @@
 #include "tracer/scene/target/wave.glsl"
 #endif
 
-#ifdef RAY_PORTAL
+#ifdef TRACE_MULTISCENE
 #include "tracer/scene/portal.glsl"
 #endif
 
@@ -50,7 +50,7 @@ ResultCode trace(
     hitObjectEXT hitObj;
     hitObjectTraceReorderExecuteEXT(
         hitObj,
-        #ifdef RAY_PORTAL
+        #ifdef TRACE_MULTISCENE
         //main TLAS or the photon's current sub-scene TLAS (local frame)
         accelerationStructureEXT(portalSelectTlas(ray.frame, params.tlas)),
         #else
@@ -70,7 +70,7 @@ ResultCode trace(
     #else
     //trace without reorder
     traceRayEXT(
-        #ifdef RAY_PORTAL
+        #ifdef TRACE_MULTISCENE
         //main TLAS or the photon's current sub-scene TLAS (local frame)
         accelerationStructureEXT(portalSelectTlas(ray.frame, params.tlas)),
         #else
@@ -110,9 +110,9 @@ void main() {
     if (waveParams.firstWave == 0) {
         //gl_LaunchIDEXT.x is the queue slot here, NOT the path id: that one is
         //restored from the record.
-        ray = loadWaveRay(
+        loadWaveRay(
             waveParams.srcQueue, waveParams.capacity, gl_LaunchIDEXT.x,
-            idx, dim, pathLength
+            ray, idx, dim, pathLength
         );
     }
     else
@@ -144,7 +144,7 @@ void main() {
 
         //Direct light sampling by extending ray to light source
         #if !defined(DISABLE_DIRECT_LIGHTING) && !defined(DISABLE_NEE)
-        traceNEE(ray, params.tlas, dim);
+        traceNEE(ray, params.tlas, idx, dim);
         #endif
     }
 

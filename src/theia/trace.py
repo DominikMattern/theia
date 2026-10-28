@@ -1996,8 +1996,8 @@ class _WaveState:
         Maximum number of iterations of the whole path.
     ray: RayModel
         Model describing the trace state to store between waves.
-    portal: bool
-        Whether rays carry a frame, i.e. whether sub-scenes are traced.
+    multiScene: bool
+        Whether rays carry a frame, i.e. whether a `MultiScene` is traced.
     capacity: int
         Maximum number of paths a wave can hold.
     """
@@ -2028,7 +2028,7 @@ class _WaveState:
         schedule: Sequence[int],
         maxPathLength: int,
         ray: RayModel,
-        portal: bool,
+        multiScene: bool,
         capacity: int,
     ) -> None:
         # Normalize the schedule: never trace beyond maxPathLength, and cover any
@@ -2049,7 +2049,7 @@ class _WaveState:
         self._schedule = waves
 
         # Trace state handed from one wave to the next, as a structure of arrays.
-        self._item = ray.waveItem(portal=portal)
+        self._item = ray.waveItem(multiScene=multiScene)
         self._queues = [
             QueueTensor(self._item, capacity, skipCounter=True) for _ in range(2)
         ]
@@ -2253,12 +2253,6 @@ class _SceneTargetTracer(Tracer):
         # paths still alive in between (see SceneForwardTracer)
         self._wave: _WaveState | None = None
         if wavefrontCompactionSchedule is not None:
-            if direction != "forward":
-                raise ValueError("Wavefront compaction requires a light source!")
-            if targetGuide is not None:
-                raise ValueError(
-                    "Wavefront compaction does not support a target guide!"
-                )
             if not self._dispatchIndirect:
                 raise RuntimeError(
                     "Wavefront compaction needs indirect dispatch, which this "
@@ -2268,7 +2262,7 @@ class _SceneTargetTracer(Tracer):
                 wavefrontCompactionSchedule,
                 nTraces,
                 ray,
-                bool(scene.macros.get("RAY_PORTAL", False)),
+                bool(scene.macros.get("TRACE_MULTISCENE", False)),
                 self.capacity,
             )
         preamble = createPreamble(
@@ -2480,6 +2474,28 @@ class _SceneTargetTracer(Tracer):
         """
         return self._wave
 
+    @property
+    def wavefrontCompactionSchedule(self) -> list[int] | None:
+        """
+        Normalized number of trace iterations each dispatch performs, or `None`
+        if wavefront compaction is disabled.
+        """
+        return None if self._wave is None else self._wave.schedule
+
+    def waveCounts(self) -> list[int]:
+        """
+        Number of paths each wave AFTER the first was launched with in the batch
+        that ran last, i.e. how many paths survived each wave.
+
+        Retrieves the counters from the device and thus must not be called while
+        a batch is still in flight. Note that the counters are reset at the start
+        of every batch, so this describes the last batch only. Requires wavefront
+        compaction to be enabled.
+        """
+        if self._wave is None:
+            raise RuntimeError("Wavefront compaction is not enabled!")
+        return self._wave.counts()
+
     def run(self, i: int) -> list[hp.Command]:
         for _, stage in self.collectStages():
             stage.bindParams(self._pipeline, i)
@@ -2564,8 +2580,7 @@ class SceneForwardTracer(_SceneTargetTracer):
 
     Note
     ----
-    Wavefront compaction does not support next event estimation
-    (`targetGuide`) and requires the device to support indirect dispatch, i.e.
+    Wavefront compaction requires the device to support indirect dispatch, i.e.
     `getEnabledRayTracingFeatures().indirectDispatch` must be `True`.
 
     See Also
@@ -2627,28 +2642,6 @@ class SceneForwardTracer(_SceneTargetTracer):
         """Source producing rays"""
         return self._lightSource
 
-    @property
-    def wavefrontCompactionSchedule(self) -> list[int] | None:
-        """
-        Normalized number of trace iterations each dispatch performs, or `None`
-        if wavefront compaction is disabled.
-        """
-        return None if self._wave is None else self._wave.schedule
-
-    def waveCounts(self) -> list[int]:
-        """
-        Number of paths each wave AFTER the first was launched with in the batch
-        that ran last, i.e. how many paths survived each wave.
-
-        Retrieves the counters from the device and thus must not be called while
-        a batch is still in flight. Note that the counters are reset at the start
-        of every batch, so this describes the last batch only. Requires wavefront
-        compaction to be enabled.
-        """
-        if self._wave is None:
-            raise RuntimeError("Wavefront compaction is not enabled!")
-        return self._wave.counts()
-
 
 class SceneBackwardTargetTracer(_SceneTargetTracer):
     """
@@ -2698,11 +2691,24 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         Whether to ignore contributions from direct lighting, i.e. paths with
         no scattering. Usefull if a dedicated tracer or estimator for direct
         light contributions is additionally used.
+    wavefrontCompactionSchedule: Sequence[int] | None, default=None
+        If not None, splits the trace loop over several dispatches ("waves"),
+        compacting the paths that are still alive in between. Each entry is the
+        number of trace iterations the corresponding dispatch performs. Entries
+        are clipped so that the total never exceeds `maxPathLength`, and a final
+        wave covering the remainder is appended if needed - the traced path
+        length is therefore the same as without compaction, regardless of the
+        schedule. If None, the whole trace loop runs in a single dispatch.
     enableInvocationReorder: bool, default=False
         Instructs the device to reorder invocations between tracing calls to
         decrease divergence. Can drastically increase performance, but on very
         simple scenes it can also decrease. Requires hardware support for
         shader execution reorder.
+
+    Note
+    ----
+    Wavefront compaction requires the device to support indirect dispatch, i.e.
+    `getEnabledRayTracingFeatures().indirectDispatch` must be `True`.
     """
 
     name = "Scene Backward Target Tracer"
@@ -2725,6 +2731,7 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
         maxTime: float = float("inf"),
         targetGuide: TargetGuide | None = None,
         disableDirectLighting: bool = False,
+        wavefrontCompactionSchedule: Sequence[int] | None = None,
         enableInvocationReorder: bool = False,
     ) -> None:
         _requireSingleScene(scene, "SceneBackwardTargetTracer")
@@ -2744,6 +2751,7 @@ class SceneBackwardTargetTracer(_SceneTargetTracer):
             maxTime=maxTime,
             targetGuide=targetGuide,
             disableDirectLighting=disableDirectLighting,
+            wavefrontCompactionSchedule=wavefrontCompactionSchedule,
             enableInvocationReorder=enableInvocationReorder,
         )
         self._camera = camera

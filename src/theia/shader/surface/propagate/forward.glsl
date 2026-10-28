@@ -3,7 +3,7 @@
 
 #include "util/offset.glsl"
 
-#ifdef RAY_PORTAL
+#ifdef TRACE_MULTISCENE
 //Portal tables + portalChangeFrame(). Included BEFORE the surface model so the
 //transmit paths below can switch scene on a portal crossing.
 #include "tracer/scene/portal.glsl"
@@ -17,7 +17,7 @@ ResultCode crossBorder(
     inout ForwardRay ray,   ///< Ray to cross
     const SurfaceHit hit    ///< Description of surface hit
 ) {
-#ifdef RAY_PORTAL
+#ifdef TRACE_MULTISCENE
     //portal surface: no offset (portalChangeFrame takes care of that)
     if ((hit.flags & MATERIAL_PORTAL_BIT) != 0) {
         ResultCode result = updateMedium(ray, hit.otherMediumIdx);
@@ -62,7 +62,7 @@ ResultCode transmitRay(
     const SurfaceHit hit,   ///< Description of surface hit
     vec3 newDir             ///< Ray in which to transmit
 ) {
-#ifdef RAY_PORTAL
+#ifdef TRACE_MULTISCENE
     //portal surface: a TRANSMITTED ray switches scene/frame; no offset 
     //(portalChangeFrame takes care of that)
     if ((hit.flags & MATERIAL_PORTAL_BIT) != 0) {

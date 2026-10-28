@@ -33,7 +33,7 @@ void traceNEE(
     if (result < 0) return;
 
     //trace nee
-    traceNEE(ray, dist, weight, params.tlas, dim);
+    traceNEE(ray, dist, weight, params.tlas, traceData.idx, dim);
 }
 
 //MIS is a sampling method that combines multiple distributions using weights

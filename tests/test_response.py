@@ -413,7 +413,7 @@ def test_BatchedIntegratingHitResponse(
 ):
     N = 64 * 1024
     cellsPerBatch = 1000
-    detCount = None if integrateAll else 3
+    detCount = 3
     # cells own a varying number of paths; the last paths belong to no cell
     count = rng.integers(0, 120, cellsPerBatch)
     assert count.sum() < N
@@ -434,7 +434,7 @@ def test_BatchedIntegratingHitResponse(
         count=count,
         binIndex=binIndex,
         binCount=binCount,
-        detectorCount=detCount,
+        detectorCount=None if integrateAll else 3,
         storeSquares=storeSquares,
         useDoublePrecision=useDouble,
     )
