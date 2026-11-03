@@ -83,7 +83,6 @@ SurfaceProperties prepareSurface(
     float weight = hasReflectivity ? reflectivity : 1.0;
     //direction the ray currently travels in
     vec3 dir = ray.direction;
-    bool valid = false;
     //After 20 iterations, the next iteration uses the macroscopic normal, which always
     //sends the ray out of the micro surface, so the walk cannot run past it. Geant4
     //instead loops until it succeeds (with a warning after 100 boundary actions).
@@ -107,16 +106,9 @@ SurfaceProperties prepareSurface(
         dir = lobeReflectedDir(lobes, dir, hit.rayNrm, microfacetNormal, diffuseDir);
 
         //the walk ends as soon as the direction leaves the micro surface
-        if (dot(dir, hit.rayNrm) > 0.0) {
-            valid = true;
+        if (dot(dir, hit.rayNrm) > 0.0)
             break;
-        }
     }
-
-    //can only happen if the walk did not leave the micro surface
-    if (!valid)
-        return props;
-
     props.weight = weight;
     props.dirReflected = dir;
     //Only used by particle rays, which cannot carry a weight. Drawn once for the
@@ -150,10 +142,7 @@ bool processSurfaceTargetHit(
 
     #else
 
-    //We have a local copy of the ray. Attenuate before detecting: what is not
-    //reflected back is what enters the detector. sampleSurfaceInteraction()
-    //passes props.weight on to the reflected ray, so the complement is exactly
-    //what the surface does not send back.
+    //We have a local copy of the ray. Attenuate before detecting
     ray.lin_contrib *= (1.0 - props.weight);
     item = createHit(
         ray,

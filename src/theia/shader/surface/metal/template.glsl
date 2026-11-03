@@ -104,7 +104,6 @@ ResultCode sampleSurfaceInteraction(
     }
     else {
         //sampled decision is forbidden -> abort tracing
-        //TODO: Use a better code here?
         return RESULT_CODE_RAY_ABSORBED;
     }
     //success

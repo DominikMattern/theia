@@ -134,10 +134,8 @@ bool processSurfaceTargetHit(
 
     #else
 
-    //We have a local copy of the ray. Attenuate before detecting: what is not
-    //reflected back is what enters the detector. sampleSurfaceInteraction()
-    //passes props.weight on to the reflected ray, so the complement is exactly
-    //what the surface does not send back.
+    //We have a local copy of the ray. Attenuate before detecting: Weight is the
+    //contribution of the reflected ray.
     ray.lin_contrib *= (1.0 - props.weight);
     item = createHit(
         ray,
