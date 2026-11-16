@@ -174,20 +174,10 @@ void main() {
     *   Still alive after this wave -> hand the path over to the next   *
     *   one. The counter both allocates the slots and sizes the next    *
     *   (indirect) dispatch.                                            *
-    *                                                                   *
-    *   One atomic per subgroup instead of one per lane: it is 32x      *
-    *   fewer atomics, and it keeps the survivors of a subgroup in      *
-    *   CONSECUTIVE slots.                                              *
     *******************************************************************/
-    uint count = subgroupAdd(1u);
-    uint offset = subgroupExclusiveAdd(1u);
-    uint base = 0;
-    if (subgroupElect()) {
-        base = atomicAdd(Counter(waveParams.dstCounter).count, count);
-    }
-    base = subgroupBroadcastFirst(base);
+    uint slot = atomicAdd(Counter(waveParams.dstCounter).count, 1u);
     saveWaveRay(
-        waveParams.dstQueue, waveParams.capacity, base + offset,
+        waveParams.dstQueue, waveParams.capacity, slot,
         ray, idx, dim, last
     );
 #endif
